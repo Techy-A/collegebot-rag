@@ -1,0 +1,26 @@
+# .streamlit/config.toml
+# =======================
+# Streamlit server configuration for CollegeBot.
+# These settings apply both locally and on Streamlit Community Cloud.
+
+[theme]
+base            = "dark"
+primaryColor    = "#4F46E5"
+backgroundColor = "#09090B"
+secondaryBackgroundColor = "#18181B"
+textColor       = "#FAFAFA"
+font            = "sans serif"
+
+[server]
+headless        = true
+enableCORS      = false
+enableXsrfProtection = true
+maxUploadSize   = 10
+
+[runner]
+# Disable the module reloader in production to avoid mid-session restarts.
+fastReruns      = true
+
+[client]
+showErrorDetails = false
+toolbarMode      = "minimal"

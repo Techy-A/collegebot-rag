@@ -1,0 +1,41 @@
+# .gitignore for CollegeBot
+# =========================
+# Never commit secrets, virtual environments, or generated artefacts.
+
+# Secrets and environment
+.env
+.streamlit/secrets.toml
+
+# Python virtual environments (NEVER commit these)
+venv/
+env/
+.venv/
+collegebot_env/
+collegebot-rag/
+
+# Generated artefacts (large; push separately or regenerate)
+dataset/
+*.jsonl
+
+# Note: faiss_store/ should be committed for Streamlit Cloud deployment
+# If your FAISS index is very large (>100MB), consider using Git LFS
+# or regenerating it on deployment. For now, it's NOT gitignored.
+
+# Model checkpoints (very large; never commit)
+*_checkpoints/
+*_merged/
+*.bin
+*.safetensors
+*.gguf
+
+# Evaluation outputs (optional; commit if you want audit trail)
+evaluation/ragas_results.json
+evaluation/ragas_results.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
