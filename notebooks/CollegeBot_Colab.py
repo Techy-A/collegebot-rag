@@ -39,14 +39,17 @@ print(result.stdout if result.returncode == 0 else "No GPU found.  Change runtim
 # CELL: 1 -- Install dependencies
 # Unsloth is installed first because it patches transformers in-place.
 # The order of these installs matters.
+# Pin the training stack.  Unsloth patches transformers in-place and tracks it
+# closely, so an unpinned "git+main" install is the most common reason a working
+# notebook breaks a week later.  Bump these deliberately, not accidentally.
 subprocess.run([
     "pip", "install", "--quiet",
-    "unsloth[colab-new]@git+https://github.com/unslothai/unsloth.git",
+    "unsloth==2024.8",
 ], check=True)
 subprocess.run([
     "pip", "install", "--quiet",
-    "xformers", "trl", "peft", "accelerate", "bitsandbytes",
-    "langchain", "langchain-community", "chromadb",
+    "trl==0.9.6", "peft==0.12.0", "accelerate==0.33.0", "bitsandbytes==0.43.3",
+    "langchain", "langchain-community",
     "sentence-transformers", "pypdf", "python-docx",
     "ragas", "datasets", "groq", "langchain-groq",
     "python-dotenv", "huggingface_hub",
@@ -57,27 +60,32 @@ print("Dependencies installed.")
 # CELL: 2 -- Hugging Face login
 # You need a WRITE token from https://huggingface.co/settings/tokens
 # The model will be pushed to your namespace at the end of training.
+# Read tokens from Colab Secrets (key icon in the left sidebar), NOT from a
+# literal in the cell -- notebooks get shared and committed with tokens still in
+# them.  Add a secret named HF_TOKEN with a WRITE-scope token.
+from google.colab import userdata
 from huggingface_hub import login as hf_login
-HF_TOKEN = "hf_your_token_here"    # REPLACE THIS WITH YOUR ACTUAL TOKEN
+HF_TOKEN = userdata.get("HF_TOKEN")
 hf_login(token=HF_TOKEN, add_to_git_credential=False)
 print("Logged in to Hugging Face.")
 
 
 # CELL: 3 -- Groq login (for dataset generation and evaluation)
 import os
-os.environ["GROQ_API_KEY"] = "gsk_your_groq_key_here"   # REPLACE THIS WITH YOUR ACTUAL KEY
+from google.colab import userdata
+# Add a Colab Secret named GROQ_API_KEY rather than pasting the key here.
+os.environ["GROQ_API_KEY"] = userdata.get("GROQ_API_KEY")
 print("Groq API key set.")
 
 
 # CELL: 4 -- Clone project and mount Drive
-# Mount Drive to persist the Chroma DB and dataset across sessions.
+# Mount Drive to persist the FAISS store and dataset across sessions.
 from google.colab import drive
 drive.mount("/content/drive", force_remount=True)
 
 # Clone or recreate the project structure.
 os.makedirs("/content/data",    exist_ok=True)
 os.makedirs("/content/dataset", exist_ok=True)
-os.makedirs("/content/chroma_db", exist_ok=True)
 print("Directory structure ready.")
 print("Upload your college PDFs to /content/data/ using the Files panel.")
 
@@ -92,7 +100,7 @@ print("Upload your college PDFs to /content/data/ using the Files panel.")
 # Using FAISS instead of Chroma for consistency with the main app.
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from pathlib import Path
@@ -272,25 +280,40 @@ print(f"LoRA adapters applied.  r={LORA_R}, alpha={LORA_ALPHA}")
 print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
 # ---- Format dataset ----
-# Alpaca prompt template.  Phi-3 is instruction-tuned, so it responds
-# well to this format without any chat template adjustments.
-ALPACA_TEMPLATE = """Below is an instruction from a college student.
-Write a response based only on official college information.
+# TRAINING FORMAT MUST MIRROR INFERENCE.
+#
+# At inference this model never answers from memory: app.py retrieves passages
+# and the prompt orders it to answer ONLY from them, refusing otherwise.  So the
+# retrieved context has to be part of the training example.
+#
+# The earlier version of this cell zipped only `instruction` and `output` and
+# dropped the `input` field, which trained the model to answer college questions
+# from parametric memory -- the exact behaviour the grounding prompt exists to
+# prevent, and a direct cause of confident wrong answers at serving time.
+ALPACA_TEMPLATE = """Below is a question from a college student, with the official
+college documents retrieved for it. Answer using ONLY the context. If the context
+does not contain the answer, say you do not have that information.
 
-### Instruction:
+### Context:
+{context}
+
+### Question:
 {instruction}
 
-### Response:
+### Answer:
 {output}"""
 
 def format_alpaca(batch):
+    contexts = batch.get("input") or [""] * len(batch["instruction"])
     return {
         "text": [
             ALPACA_TEMPLATE.format(
+                context=(c.strip() if c and c.strip() else "(no context retrieved)"),
                 instruction=i,
                 output=o,
             )
-            for i, o in zip(batch["instruction"], batch["output"])
+            + tokenizer.eos_token  # without EOS the model never learns to stop
+            for i, c, o in zip(batch["instruction"], contexts, batch["output"])
         ]
     }
 
@@ -339,24 +362,37 @@ trainer.train()
 print("Training complete.")
 
 
-# CELL: 10 -- Merge and push Phi-3-mini to Hub
-# Merging the LoRA adapters into the base model before pushing
-# simplifies inference -- no need for PEFT at inference time.
-print("Merging LoRA adapters...")
-model.save_pretrained_merged(
-    "/content/phi3_merged",
-    tokenizer,
-    save_method="merged_16bit",
-)
-print(f"Pushing to {HF_PUSH_NAME_PHI3}...")
-model.push_to_hub_merged(
-    HF_PUSH_NAME_PHI3,
-    tokenizer,
-    save_method    = "merged_16bit",
-    token          = HF_TOKEN,
-    private        = False,
-)
-print(f"Phi-3-mini pushed to https://huggingface.co/{HF_PUSH_NAME_PHI3}")
+# CELL: 10 -- Push Phi-3-mini to Hub
+# Push the ADAPTER first.  It is a few MB, uploads in seconds, and is the
+# artifact that actually proves the fine-tune happened -- so if the session
+# times out or the disk fills during the merge below, the work is not lost.
+print(f"Pushing LoRA adapter to {HF_PUSH_NAME_PHI3}-adapter...")
+model.push_to_hub(f"{HF_PUSH_NAME_PHI3}-adapter", tokenizer, token=HF_TOKEN)
+print("Adapter pushed.")
+
+# Merging is optional and expensive: merged 16-bit weights are ~7.5 GB for a 7B
+# model, which strains free-tier Colab disk and upload bandwidth.  Do it only if
+# you intend to serve the model through an HF Inference Endpoint, which wants a
+# standalone model rather than a base+adapter pair.
+PUSH_MERGED = True  # set False to stop after the adapter
+if PUSH_MERGED:
+    print("Merging LoRA adapters...")
+    model.save_pretrained_merged(
+        "/content/phi3_merged",
+        tokenizer,
+        save_method="merged_16bit",
+    )
+    print(f"Pushing to {HF_PUSH_NAME_PHI3}...")
+    model.push_to_hub_merged(
+        HF_PUSH_NAME_PHI3,
+        tokenizer,
+        save_method    = "merged_16bit",
+        token          = HF_TOKEN,
+        private        = False,
+    )
+    print(f"Phi-3-mini pushed to https://huggingface.co/{HF_PUSH_NAME_PHI3}")
+    print("To serve it: create an HF Inference Endpoint for this repo, then set")
+    print("PHI3_ENDPOINT_URL in .env -- llm_factory will then offer it in the UI.")
 
 
 # CELL: 11 -- [MARKDOWN]

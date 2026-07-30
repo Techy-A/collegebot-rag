@@ -1,212 +1,96 @@
 """
-app.py  --  CollegeBot : Production RAG Chatbot (Streamlit Entry Point)
-=========================================================================
-"The purpose of abstraction is not to be vague, but to create a new
- semantic level in which one can be absolutely precise."
-    -- Edsger W. Dijkstra
+app.py  --  CollegeBot : grounded college assistant (Streamlit UI)
+==================================================================
+This file is presentation only.  Retrieval, prompting and generation live in
+rag.py so the evaluation harness exercises the same code path the user sees.
 
-Vector store backend: FAISS (replaces ChromaDB for Windows compatibility).
-FAISS requires no C++ compiler, no server, and ships pre-built wheels
-on every platform including Windows.
+Two rules this UI is built around:
+
+1.  Never render model or document text as HTML.  Message bodies go through
+     st.markdown() without unsafe_allow_html, so a question containing "<" or a
+     PDF chunk containing markup cannot inject anything.  Chrome that does use
+     unsafe_allow_html interpolates only html.escape()'d values.
+2.  Never assert something the system did not do.  The status pill reflects a
+     real health check, the model chip names the model that actually answered,
+     a refusal is styled as a refusal, and heuristic scores are labelled as
+     heuristics rather than presented as verified metrics.
 """
 
+import html
 import os
 import time
-import streamlit as st
-from dotenv import load_dotenv
 from pathlib import Path
 
-# Try loading .env from multiple locations.
-load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
-load_dotenv(override=True)
+import streamlit as st
+from dotenv import load_dotenv
+
+import rag
+from llm_factory import LABELS, available_models, get_llm
+from prompts import REFUSAL_TEXT, is_refusal
+
+load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=False)
+rag.configure_logging()
+
 st.set_page_config(
-    page_title            = "CollegeBot -- RAG Assistant",
-    layout                = "wide",
-    initial_sidebar_state = "expanded",
+    page_title="CollegeBot",
+    page_icon="🎓",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
-
-:root {
-    --c-primary    : #4F46E5;
-    --c-primary-d  : #3730A3;
-    --c-accent     : #059669;
-    --c-accent-d   : #065F46;
-    --c-bg         : #09090B;
-    --c-surface    : #18181B;
-    --c-raised     : #27272A;
-    --c-text-hi    : #FAFAFA;
-    --c-text-mid   : #A1A1AA;
-    --c-text-lo    : #52525B;
-    --c-border     : #3F3F46;
-    --r-sm         : 6px;
-    --r-md         : 12px;
-    --f-mono       : 'IBM Plex Mono', 'Courier New', monospace;
-    --f-sans       : 'IBM Plex Sans', 'Segoe UI', sans-serif;
-}
-html, body, [data-testid="stAppViewContainer"] {
-    background : var(--c-bg); color: var(--c-text-hi); font-family: var(--f-sans);
-}
-[data-testid="stSidebar"] { background:#0C0C0E; border-right:1px solid var(--c-border); }
-[data-testid="stSidebar"] * { color: var(--c-text-hi) !important; }
-[data-testid="stSidebar"] label {
-    font-family:var(--f-mono); font-size:0.72rem;
-    color:var(--c-text-mid) !important; letter-spacing:0.07em; text-transform:uppercase;
-}
-.cb-topbar {
-    display:flex; align-items:center; justify-content:space-between;
-    padding:1rem 1.4rem; background:var(--c-surface);
-    border:1px solid var(--c-border); border-radius:var(--r-md); margin-bottom:1.4rem;
-}
-.cb-title { font-family:var(--f-mono); font-size:1.1rem; font-weight:600; color:var(--c-text-hi); }
-.cb-subtitle { font-size:0.77rem; color:var(--c-text-mid); margin-top:2px; }
-.badge { display:inline-block; border-radius:999px; padding:3px 10px; font-size:0.68rem; font-family:var(--f-mono); font-weight:600; }
-.badge-on  { background:#052E16; color:#6EE7B7; border:1px solid #059669; }
-.badge-mdl { background:#1E1B4B; color:#A5B4FC; border:1px solid #4F46E5; }
-.cb-row { display:flex; align-items:flex-start; gap:10px; margin-bottom:1rem; }
-.cb-row-u { flex-direction:row-reverse; }
-.cb-av {
-    width:34px; height:34px; border-radius:50%; display:flex;
-    align-items:center; justify-content:center;
-    font-family:var(--f-mono); font-size:0.65rem; font-weight:600; flex-shrink:0;
-}
-.cb-av-u { background:var(--c-primary-d); color:#C7D2FE; }
-.cb-av-b { background:var(--c-accent-d);  color:#6EE7B7; }
-.cb-bbl { max-width:75%; padding:0.85rem 1.1rem; border-radius:var(--r-md); font-size:0.91rem; line-height:1.72; }
-.cb-bbl-u { background:var(--c-primary); color:#EEF2FF; border-bottom-right-radius:3px; }
-.cb-bbl-b { background:var(--c-surface); color:var(--c-text-hi); border:1px solid var(--c-border); border-bottom-left-radius:3px; }
-.src-tag {
-    display:inline-block; background:var(--c-bg); border:1px solid var(--c-primary-d);
-    color:#A5B4FC; font-size:0.67rem; font-family:var(--f-mono);
-    padding:2px 7px; border-radius:var(--r-sm); margin:4px 3px 0 0;
-}
-.mc-row { display:flex; gap:10px; margin-top:10px; flex-wrap:wrap; }
-.mc { flex:1; background:var(--c-bg); border:1px solid var(--c-border); border-radius:var(--r-sm); padding:8px 14px; text-align:center; }
-.mc-v { font-family:var(--f-mono); font-size:1.25rem; font-weight:600; color:#6EE7B7; }
-.mc-l { font-size:0.65rem; color:var(--c-text-mid); margin-top:2px; font-family:var(--f-mono); text-transform:uppercase; }
-.lat { font-size:0.65rem; color:var(--c-text-lo); font-family:var(--f-mono); margin-top:6px; }
-[data-testid="stChatInput"]>div { background:var(--c-surface) !important; border:1px solid var(--c-border) !important; border-radius:var(--r-md) !important; }
-[data-testid="stChatInput"] textarea { color:var(--c-text-hi) !important; }
-.stButton>button {
-    background:var(--c-surface); color:var(--c-text-hi); border:1px solid var(--c-border);
-    border-radius:var(--r-sm); font-family:var(--f-sans); font-size:0.82rem; transition:border-color 0.15s;
-}
-.stButton>button:hover { background:var(--c-raised); border-color:var(--c-primary); color:#A5B4FC; }
-hr { border-color:var(--c-border); }
-::-webkit-scrollbar { width:4px; }
-::-webkit-scrollbar-thumb { background:var(--c-border); border-radius:2px; }
-</style>
-""", unsafe_allow_html=True)
+# Streamlit validates avatars against its emoji list, so decorative glyphs like
+# "◆" are rejected outright.  Rather than bolt an emoji onto a deliberately
+# restrained interface, use Streamlit's built-in monochrome icons and style them
+# from assets/style.css.
+SUGGESTIONS = [
+    "What are the B.Tech admission requirements?",
+    "What is the fee structure for B.Tech?",
+    "What hostel facilities are available?",
+    "What are the library opening hours?",
+    "What scholarships can I apply for?",
+    "What were the placement figures?",
+]
 
 
 # ------------------------------------------------------------------
-# Pipeline loader -- uses FAISS instead of ChromaDB.
-# FAISS MMR is accessed via max_marginal_relevance_search() wrapped
-# inside a custom retriever so it plugs into the LangChain chain API.
+# Styling
 # ------------------------------------------------------------------
-@st.cache_resource(show_spinner="Initialising RAG pipeline...")
-def load_pipeline(llm_choice: str, temperature: float):
-    """
-    Build the ConversationalRetrievalChain backed by FAISS.
+@st.cache_data
+def load_css() -> str:
+    path = Path(__file__).parent / "assets" / "style.css"
+    return path.read_text(encoding="utf-8") if path.exists() else ""
 
-    "Make it work, make it right, make it fast -- in that order."
-        -- Kent Beck
-    """
-    # Force load .env from the project root before anything else runs.
-    from dotenv import load_dotenv
-    from pathlib import Path
-    load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=True)
-    
-    import sys, pathlib
-    sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    from langchain_community.vectorstores import FAISS
-    from langchain.memory import ConversationBufferWindowMemory
-    from langchain.chains import ConversationalRetrievalChain
-    from langchain.prompts import PromptTemplate
-    from llm_factory import get_llm
+st.markdown(f"<style>{load_css()}</style>", unsafe_allow_html=True)
 
-    # --- Embeddings ---
-    embeddings = HuggingFaceEmbeddings(
-        model_name    = "sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs  = {"device": "cpu"},
-        encode_kwargs = {"normalize_embeddings": True},
-    )
 
-    # --- FAISS vector store ---
-    faiss_path = os.getenv("FAISS_PATH", "./faiss_store")
-    if not os.path.isdir(faiss_path):
-        raise FileNotFoundError(
-            f"No FAISS store found at '{faiss_path}'.  "
-            "Run: python ingest.py --sample"
-        )
-    vectorstore = FAISS.load_local(
-        faiss_path,
-        embeddings,
-        allow_dangerous_deserialization=True,   # safe: we wrote this file ourselves
-    )
+# ------------------------------------------------------------------
+# Resources
+# ------------------------------------------------------------------
+# Cached on the store path alone.  Model choice and temperature are NOT part of
+# the key, so changing them never reloads the index; and no conversation state
+# is created in here, so nothing is shared between sessions.
+@st.cache_resource(show_spinner=False)
+def get_store(faiss_path: str):
+    return rag.load_corpus(faiss_path)
 
-    # --- MMR retriever ---
-    # FAISS exposes MMR via as_retriever with search_type="mmr".
-    # Optimized for better context precision: increased fetch_k to 30
-    retriever = vectorstore.as_retriever(
-        search_type   = "mmr",
-        search_kwargs = {"k": 6, "fetch_k": 30, "lambda_mult": 0.5},
-    )
 
-    # --- Grounding prompt ---
-    # Optimized for better faithfulness and answer relevance
-    QA_PROMPT = PromptTemplate(
-        template="""You are CollegeBot, a precise and reliable assistant for college
-students, faculty, and administrative staff.
+FAISS_PATH = os.getenv("FAISS_PATH", "./faiss_store")
 
-STRICT RULES:
-1. Answer ONLY from the provided CONTEXT below. Every sentence in your answer 
-   must come directly from the CONTEXT or be a direct paraphrase of it.
-2. Directly address the question first before providing additional details.
-3. If the context does not contain the answer, respond with exactly:
-   "I do not have that information in my knowledge base. Please contact
-    the relevant college office directly."
-4. Never invent deadlines, fee amounts, names, dates, or policy details.
-5. Use bullet points for any list of three or more items.
-6. Cite the source document name when it is present in the metadata.
+store, store_error = None, None
+try:
+    with st.spinner("Warming up the knowledge base (first load only)..."):
+        store = get_store(FAISS_PATH)
+except Exception as exc:  # noqa: BLE001 - surfaced to the user below
+    store_error = str(exc)
 
-CONTEXT:
-{context}
+models = available_models()
+healthy = store is not None and bool(models)
 
-CONVERSATION HISTORY:
-{chat_history}
-
-STUDENT QUESTION: {question}
-
-ANSWER:""",
-        input_variables=["context", "chat_history", "question"],
-    )
-
-    # --- Memory ---
-    memory = ConversationBufferWindowMemory(
-        k              = 5,
-        memory_key     = "chat_history",
-        return_messages= True,
-        output_key     = "answer",
-    )
-
-    # --- LLM ---
-    llm = get_llm(llm_choice, temperature)
-
-    # --- Chain ---
-    chain = ConversationalRetrievalChain.from_llm(
-        llm                       = llm,
-        retriever                 = retriever,
-        memory                    = memory,
-        combine_docs_chain_kwargs = {"prompt": QA_PROMPT},
-        return_source_documents   = True,
-        verbose                   = False,
-    )
-    return chain, vectorstore
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "pending" not in st.session_state:
+    st.session_state.pending = None
 
 
 # ------------------------------------------------------------------
@@ -214,184 +98,317 @@ ANSWER:""",
 # ------------------------------------------------------------------
 with st.sidebar:
     st.markdown(
-        '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:0.95rem;'
-        'font-weight:600;color:#FAFAFA;padding:0.4rem 0;">CollegeBot</div>',
+        '<div class="cb-brand">CollegeBot</div><div class="cb-brand-sub">Grounded Answers</div>',
         unsafe_allow_html=True,
     )
-    st.markdown('<span class="badge badge-on">ONLINE</span>', unsafe_allow_html=True)
+
+    if healthy:
+        st.markdown(
+            '<span class="cb-pill cb-pill-ok"><span class="cb-dot"></span>Online</span>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<span class="cb-pill cb-pill-down"><span class="cb-dot"></span>Unavailable</span>',
+            unsafe_allow_html=True,
+        )
+
     st.markdown("---")
 
-    llm_choice = st.selectbox(
-        "Language Model",
-        options=[
-            "groq/llama-3.1-8b-instant",
-            "phi3-mini-finetuned",
-            "mistral-7b-finetuned",
-        ],
-        help="Groq is recommended -- free, no GPU needed, fast.",
-    )
-    temperature = st.slider("Temperature", 0.0, 1.0, 0.05, 0.05,
-                            help="Keep at 0.05 for maximum factual accuracy.")
-    show_sources = st.toggle("Show retrieved sources", value=True)
-    show_metrics = st.toggle("Show inline eval scores",  value=False)
+    if models:
+        model_choice = st.selectbox(
+            "Model",
+            options=models,
+            format_func=lambda m: LABELS.get(m, m),
+            help="Only backends that are actually configured are listed.",
+        )
+    else:
+        model_choice = None
+        st.warning("No LLM backend configured. Set GROQ_API_KEY in .env")
+
+    show_sources = st.toggle("Show sources", value=True)
+
+    with st.expander("Advanced"):
+        temperature = st.slider(
+            "Temperature",
+            0.0,
+            1.0,
+            0.05,
+            0.05,
+            help="Keep low for factual accuracy. Does not reload the index.",
+        )
+        show_metrics = st.toggle(
+            "Heuristic self-check",
+            value=False,
+            help="Fast keyword-overlap approximations. Not verified metrics.",
+        )
+        mode = "hybrid dense+BM25 (RRF)" if rag.USE_HYBRID else "dense MMR"
+        st.caption(f"Retrieval: {mode}, k={rag.RETRIEVAL_K}, fetch_k={rag.RETRIEVAL_FETCH_K}")
+        if rag.USE_RERANKER:
+            st.caption("Cross-encoder reranking: on")
+
     st.markdown("---")
 
-    if st.button("Clear conversation", use_container_width=True):
+    if st.button("New conversation", use_container_width=True):
+        # Session-scoped only.  Never st.cache_resource.clear(), which is
+        # process-global and would evict the index for every other visitor.
         st.session_state.messages = []
-        st.cache_resource.clear()
+        st.session_state.pending = None
         st.rerun()
 
+    if store is not None:
+        st.markdown(
+            f'<div class="cb-footnote">{store.ntotal:,} indexed passages<br>'
+            "FAISS + BM25 &middot; MiniLM-L6-v2<br>hybrid RRF retrieval</div>",
+            unsafe_allow_html=True,
+        )
+
+
+# ------------------------------------------------------------------
+# Masthead
+# ------------------------------------------------------------------
+model_label = LABELS.get(model_choice, model_choice or "not configured")
+st.markdown(
+    f"""
+<div class="cb-masthead">
+  <div>
+    <div class="cb-masthead-title">CollegeBot</div>
+    <div class="cb-masthead-sub">Answers grounded in official college documents &mdash; with citations</div>
+  </div>
+  <span class="cb-chip">{html.escape(str(model_label))}</span>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+if store_error:
     st.markdown(
-        '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:0.68rem;'
-        'color:#3F3F46;margin-top:1.2rem;line-height:1.8;">'
-        'RAG -- MMR -- QLoRA<br>FAISS -- all-MiniLM-L6-v2<br>RAGAS evaluation</div>',
+        '<div class="cb-notice cb-notice-error"><span class="cb-notice-icon">◆</span><div>'
+        '<span class="cb-notice-label">Knowledge base unavailable</span>'
+        f"{html.escape(store_error)}</div></div>",
         unsafe_allow_html=True,
     )
 
-# ------------------------------------------------------------------
-# Top bar
-# ------------------------------------------------------------------
-model_label = {
-    "groq/llama-3.1-8b-instant": "Groq / Llama-3.1-8B",
-    "phi3-mini-finetuned"       : "Phi-3-mini  (fine-tuned)",
-    "mistral-7b-finetuned"      : "Mistral-7B  (fine-tuned)",
-}.get(llm_choice, llm_choice)
-
-st.markdown(f"""
-<div class="cb-topbar">
-  <div>
-    <div class="cb-title">CollegeBot</div>
-    <div class="cb-subtitle">Production RAG assistant -- FAISS backend</div>
-  </div>
-  <span class="badge badge-mdl">{model_label}</span>
-</div>
-""", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# Session state
+# Rendering helpers
 # ------------------------------------------------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+def render_citations(cards: list) -> None:
+    if not cards:
+        return
+    st.markdown('<div class="cb-cite-head">Sources</div>', unsafe_allow_html=True)
+    for c in cards:
+        page = f" &middot; page {c['page']}" if c.get("page") else ""
+        year = f" &middot; {c['year']}" if c.get("year") else ""
+        label = f"[{c['n']}] {c['title']}" + (f" — page {c['page']}" if c.get("page") else "")
+        with st.expander(label):
+            st.markdown(
+                f'<div class="cb-cite-file">'
+                f'<span class="cb-cite-n">{c["n"]}</span> '
+                f'{html.escape(c["file"])}<span class="cb-cite-page">{page}{year}</span></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="cb-snippet">{html.escape(c["snippet"])}</div>',
+                unsafe_allow_html=True,
+            )
 
-# ------------------------------------------------------------------
-# Pipeline load
-# ------------------------------------------------------------------
-try:
-    chain, _vs  = load_pipeline(llm_choice, temperature)
-    pipeline_ok = True
-except FileNotFoundError as e:
-    st.error(str(e))
-    pipeline_ok = False
-except Exception as e:
-    st.error(
-        f"Pipeline failed to initialise: {e}  "
-        "Verify GROQ_API_KEY is set in .env and all packages are installed."
+
+def render_metrics(scores: dict) -> None:
+    if not scores:
+        return
+    tiles = "".join(
+        f'<div class="cb-metric"><div class="cb-metric-v">{scores.get(k, 0):.0%}</div>'
+        f'<div class="cb-metric-l">{lbl}</div>'
+        f'<div class="cb-metric-bar"><div class="cb-metric-fill" '
+        f'style="width:{min(100, scores.get(k, 0) * 100):.0f}%"></div></div></div>'
+        for k, lbl in (
+            ("faithfulness", "Grounding"),
+            ("answer_relevance", "Relevance"),
+            ("context_precision", "Precision"),
+        )
     )
-    pipeline_ok = False
+    st.markdown(f'<div class="cb-metrics">{tiles}</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="cb-caveat">Fast keyword-overlap heuristics for sanity-checking '
+        "only &mdash; not verified RAGAS metrics.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_meta(msg: dict) -> None:
+    bits = []
+    if msg.get("latency"):
+        bits.append(f"<b>{msg['latency']:.2f}s</b> response")
+    if msg.get("n_sources"):
+        bits.append(f"<b>{msg['n_sources']}</b> passages retrieved")
+    if msg.get("model"):
+        bits.append(f"<b>{html.escape(str(msg['model']))}</b>")
+    if bits:
+        st.markdown(
+            f'<div class="cb-meta">{"".join(f"<span>{b}</span>" for b in bits)}</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def render_assistant(msg: dict) -> None:
+    """Render one stored assistant turn: notice / answer, citations, meta."""
+    if msg.get("kind") == "error":
+        st.markdown(
+            '<div class="cb-notice cb-notice-error"><span class="cb-notice-icon">◆</span><div>'
+            f'<span class="cb-notice-label">{html.escape(msg.get("label", "Error"))}</span>'
+            f"{html.escape(msg['content'])}</div></div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    if msg.get("kind") == "refusal":
+        st.markdown(
+            '<div class="cb-notice cb-notice-refusal"><span class="cb-notice-icon">◇</span><div>'
+            '<span class="cb-notice-label">Not in the knowledge base</span>'
+            f"{html.escape(msg['content'])}</div></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(msg["content"])
+
+    if show_sources and msg.get("sources"):
+        render_citations(msg["sources"])
+    if show_metrics and msg.get("scores"):
+        render_metrics(msg["scores"])
+    render_meta(msg)
+
 
 # ------------------------------------------------------------------
-# Render chat history
+# Empty state
 # ------------------------------------------------------------------
-with st.container():
-    if not st.session_state.messages:
-        st.markdown("""
-<div style="text-align:center;padding:3rem 0 1.5rem;">
-  <div style="font-family:'IBM Plex Mono',monospace;font-size:2rem;color:#27272A;letter-spacing:-2px;">collegebot</div>
-  <div style="font-size:0.82rem;color:#52525B;margin-top:0.5rem;">
-    Ask about admissions, fees, courses, hostel, scholarships, or campus policy.
-  </div>
-</div>""", unsafe_allow_html=True)
-
-        c1, c2, c3 = st.columns(3)
-        prompts = [
-            "What are the admission requirements?",
-            "What scholarships are available?",
-            "How do I register for elective courses?",
-        ]
-        for col, prompt in zip([c1, c2, c3], prompts):
-            if col.button(prompt, use_container_width=True):
-                st.session_state.messages.append({"role": "user", "content": prompt})
+if not st.session_state.messages:
+    st.markdown(
+        '<div class="cb-hero">'
+        '<div class="cb-hero-mark">collegebot</div>'
+        '<div class="cb-hero-sub">Ask about admissions, fees, hostel, courses, '
+        "scholarships, placements or campus policy.</div>"
+        '<div class="cb-hero-rule"></div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    if healthy:
+        cols = st.columns(3)
+        for i, s in enumerate(SUGGESTIONS):
+            if cols[i % 3].button(s, key=f"sug{i}", use_container_width=True):
+                st.session_state.pending = s
                 st.rerun()
 
-    for msg in st.session_state.messages:
-        if msg["role"] == "user":
-            st.markdown(f"""
-<div class="cb-row cb-row-u">
-  <div class="cb-av cb-av-u">YOU</div>
-  <div class="cb-bbl cb-bbl-u">{msg["content"]}</div>
-</div>""", unsafe_allow_html=True)
-        else:
-            src_html = ""
-            if show_sources and msg.get("sources"):
-                tags = "".join(f'<span class="src-tag">{s}</span>' for s in msg["sources"][:5])
-                src_html = f'<div style="margin-top:8px">{tags}</div>'
-
-            met_html = ""
-            if show_metrics and msg.get("scores"):
-                sc = msg["scores"]
-                met_html = f"""
-<div class="mc-row">
-  <div class="mc"><div class="mc-v">{sc.get('faithfulness',0):.0%}</div><div class="mc-l">Faithfulness</div></div>
-  <div class="mc"><div class="mc-v">{sc.get('answer_relevance',0):.0%}</div><div class="mc-l">Answer Relevance</div></div>
-  <div class="mc"><div class="mc-v">{sc.get('context_precision',0):.0%}</div><div class="mc-l">Context Precision</div></div>
-</div>"""
-
-            lat_html = f'<div class="lat">latency: {msg["latency"]:.3f}s</div>' if msg.get("latency") else ""
-
-            st.markdown(f"""
-<div class="cb-row">
-  <div class="cb-av cb-av-b">BOT</div>
-  <div class="cb-bbl cb-bbl-b">{msg["content"]}{src_html}{met_html}{lat_html}</div>
-</div>""", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# Chat input
+# History
 # ------------------------------------------------------------------
-if pipeline_ok:
-    user_input = st.chat_input("Ask about admissions, fees, courses, hostel, exams...")
-    if user_input and user_input.strip():
-        st.session_state.messages.append({"role": "user", "content": user_input.strip()})
-        st.rerun()
+for msg in st.session_state.messages:
+    if msg["role"] == "user":
+        with st.chat_message("user"):
+            st.markdown(msg["content"])
+    else:
+        with st.chat_message("assistant"):
+            render_assistant(msg)
+
 
 # ------------------------------------------------------------------
-# Response generation
+# Input and generation
 # ------------------------------------------------------------------
-if (
-    pipeline_ok
-    and st.session_state.messages
-    and st.session_state.messages[-1]["role"] == "user"
-):
-    q = st.session_state.messages[-1]["content"]
+typed = st.chat_input("Ask about admissions, fees, hostel, courses...", disabled=not healthy)
+question = typed or st.session_state.pending
+st.session_state.pending = None
 
-    with st.spinner("Retrieving context and generating answer..."):
+if question and healthy:
+    history = list(st.session_state.messages)
+    st.session_state.messages.append({"role": "user", "content": question})
+
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    with st.chat_message("assistant"):
+        record = {"role": "assistant", "model": model_label}
+        t0 = time.time()
         try:
-            t0      = time.time()
-            result  = chain.invoke({"question": q})
-            latency = round(time.time() - t0, 3)
+            with st.spinner("Searching the documents..."):
+                llm = get_llm(model_choice, temperature)
+                docs = rag.retrieve(store, rag.build_retrieval_query(question, history))
+                prompt = rag.build_prompt(question, docs, history)
 
-            answer  = result.get("answer", "No answer was generated.")
-            docs    = result.get("source_documents", [])
-            sources = list({
-                doc.metadata.get("source", "unknown").split("/")[-1].split("\\")[-1]
-                for doc in docs
-            })
+            answer = st.write_stream(rag.stream_answer(llm, prompt))
+            answer = (answer or "").strip()
+            latency = time.time() - t0
 
-            scores = {}
-            if show_metrics:
-                from evaluation.quick_score import quick_evaluate
-                scores = quick_evaluate(q, answer, docs)
+            if is_refusal(answer) or not answer:
+                record.update(
+                    kind="refusal",
+                    content=answer or REFUSAL_TEXT,
+                    sources=[],
+                    n_sources=len(docs),
+                    latency=latency,
+                )
+                # The streamed text is already painted as a plain answer.  Store
+                # the record first, then rerun so history repaints it with the
+                # refusal treatment -- an honest "I don't know" must not look
+                # like an answer.  Appending BEFORE the rerun matters:
+                # st.rerun() raises immediately, so the append at the end of
+                # this block would never execute and the turn would be lost.
+                st.session_state.messages.append(record)
+                st.rerun()
+            else:
+                cards = rag.source_cards(docs)
+                scores = {}
+                if show_metrics:
+                    from evaluation.quick_score import quick_evaluate
 
-        except Exception as e:
-            answer  = f"Error generating response: {e}"
-            sources = []
-            scores  = {}
-            latency = 0.0
+                    scores = quick_evaluate(question, answer, docs)
 
-    st.session_state.messages.append({
-        "role"   : "assistant",
-        "content": answer,
-        "sources": sources,
-        "scores" : scores,
-        "latency": latency,
-    })
-    st.rerun()
+                record.update(
+                    kind="answer",
+                    content=answer,
+                    sources=cards,
+                    n_sources=len(docs),
+                    scores=scores,
+                    latency=latency,
+                )
+                if show_sources:
+                    render_citations(cards)
+                if show_metrics:
+                    render_metrics(scores)
+                render_meta(record)
+
+        except rag.RateLimited as exc:
+            # The binding limit is tokens-per-minute, not a daily quota, so this
+            # clears on its own in under a minute.  Say that, and say how long.
+            wait = rag.retry_after_seconds(exc)
+            when = f"about {wait:.0f} seconds" if wait else "under a minute"
+            record.update(
+                kind="error",
+                label="Too many questions per minute",
+                content=(
+                    f"The free Groq tier allows 6,000 tokens per minute and this "
+                    f"conversation just used them up. Try again in {when} \u2014 "
+                    "nothing is broken and no daily quota has been spent."
+                ),
+            )
+            render_assistant(record)
+        except OSError as exc:
+            record.update(kind="error", label="Not configured", content=str(exc))
+            render_assistant(record)
+        except Exception as exc:  # noqa: BLE001
+            rag.log.exception("generation failed")
+            record.update(
+                kind="error",
+                label="Something went wrong",
+                content=f"{type(exc).__name__}: {exc}",
+            )
+            render_assistant(record)
+
+    st.session_state.messages.append(record)
+
+st.markdown(
+    '<div class="cb-disclaimer">Unofficial project, not affiliated with any institution. '
+    "Answers are generated from indexed documents and may be incomplete or out of date "
+    "&mdash; verify fees, dates and deadlines with the relevant college office.</div>",
+    unsafe_allow_html=True,
+)

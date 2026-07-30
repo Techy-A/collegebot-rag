@@ -1,403 +1,241 @@
-# CollegeBot  --  End-to-End Production RAG Chatbot
-# ===================================================
+# CollegeBot
 
-> "The value of an idea lies in the using of it."  -- Thomas Edison
+A grounded question-answering assistant for college information. It answers
+questions about admissions, fees, hostels, courses, scholarships, placements and
+campus policy **only** from a corpus of source documents, cites the document and
+page it used, and declines when the answer is not in the corpus.
 
-CollegeBot is a production-grade Retrieval-Augmented Generation (RAG)
-chatbot for college information retrieval.  It is built entirely on free
-resources: Google Colab Free Tier, Hugging Face Hub, Groq Cloud, and
-Streamlit Community Cloud.
-
----
-
-## Project Structure
+Built entirely on free infrastructure: FAISS (vector store), Hugging Face
+sentence-transformers (embeddings), Groq Cloud (inference), Streamlit (UI).
 
 ```
-collegebot-rag/
-    app.py                      Streamlit application entry point
-    llm_factory.py              Multi-LLM factory (Groq, Phi-3, Mistral)
-    ingest.py                   Data ingestion and FAISS vector store builder
-    generate_dataset.py         Synthetic Q-A dataset generator for fine-tuning
-    requirements.txt            Python dependencies for Streamlit Cloud
-    .env.example                Environment variable template
-    .streamlit/
-        config.toml             Streamlit theme and server config
-        secrets.toml            Secret keys template (do not commit)
-    data/                       Place your college PDFs here
-    faiss_store/                Persistent FAISS index (auto-generated)
-    dataset/                    Generated fine-tuning dataset (JSONL)
-    evaluation/
-        quick_score.py          Heuristic inline scoring (sub-10 ms)
-        ragas_eval.py           Full RAGAS evaluation script
-        __init__.py
-    notebooks/
-        CollegeBot_Colab.py     Colab notebook cells as a Python file
+                        INGEST  (offline, one command)
+   data/*.pdf|*.txt ─▶ load ─▶ tag effective year ─▶ split (800 chars, 150 overlap)
+                    ─▶ embed with all-MiniLM-L6-v2 (384-dim, CPU)
+                    ─▶ FAISS index + manifest.json
+
+                        QUERY  (live, per question)
+   question ─▶ (+ previous question, so follow-ups are retrievable)
+            ─▶ MMR retrieval: fetch_k=30 candidates → k=6 diverse passages
+            ─▶ numbered context + grounding prompt
+            ─▶ Groq llama-3.1-8b-instant, streamed token by token
+            ─▶ answer + page-numbered citations + latency
 ```
 
 ---
 
-## Phase 0: Pre-requisites (15 minutes)
+## Quick start
 
-Before writing a single line of code, gather the following free accounts
-and API keys.  Every one of these is genuinely free with no credit card.
+```bash
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 
-| Service              | What it provides               | URL                                        |
-|----------------------|--------------------------------|--------------------------------------------|
-| Google Account       | Access to Google Colab         | accounts.google.com                        |
-| Hugging Face account | Model hosting, free Inference  | huggingface.co/join                        |
-| Groq account         | Free LLM API (~500 tok/s)      | console.groq.com                           |
-| GitHub account       | Source control, Streamlit CI   | github.com/join                            |
-| Streamlit account    | Free cloud deployment          | share.streamlit.io                         |
+# free key, no card: https://console.groq.com/keys
+echo 'GROQ_API_KEY=gsk_your_key_here' > .env
 
-After registering:
-
-1. Go to https://huggingface.co/settings/tokens
-   Create a NEW TOKEN with "Write" permission.  Save it as HF_TOKEN.
-
-2. Go to https://console.groq.com -> API Keys -> Create API Key.
-   Save it as GROQ_API_KEY.
-
-3. Create a new public GitHub repository named `collegebot-rag` at https://github.com/Techy-A/collegebot-rag
-
----
-
-## Phase 1: Data Ingestion and Vector Store
-
-> "Garbage in, garbage out."  -- George Fuechsel (1963)
-> This is the most important phase.  Your retrieval quality depends entirely
-> on the quality and coverage of your source documents.
-
-### 1.1 Prepare documents
-
-Collect all college information documents you can find:
-- Student handbook (PDF)
-- Admission brochure (PDF)
-- Fee structure circular (PDF)
-- Academic calendar (PDF)
-- Hostel rules (PDF or DOCX)
-- Course catalogue (PDF)
-- Examination regulations (PDF)
-
-Place them all in the `data/` folder.
-
-If you do not have real documents yet, run:
-
-    python ingest.py --sample
-
-This creates a synthetic `data/sample_college_handbook.txt` with all the
-major topics covered, so you can test the full pipeline immediately.
-
-### 1.2 Build the vector store
-
-    python ingest.py
-
-Expected output:
-
-    CollegeBot -- Data Ingestion Pipeline
-    ==================================================
-    Scanning ./data -- found 7 files total.
-      Loaded  admission_handbook.pdf  (42 pages)
-      Loaded  fee_structure_2024.pdf  (8 pages)
-      ...
-    Total documents loaded before splitting: 50
-    Chunks after splitting: 312
-    chunk_size=800, overlap=150
-    Loading embedding model: sentence-transformers/all-MiniLM-L6-v2
-    Building FAISS index at ./faiss_store
-      Embedding batch 1/1 (312 chunks)...
-    Vector store built in 187.3s.
-    Verification -- MMR retrieval smoke test:
-      [1] (admission_handbook.pdf) Required documents include 10th and 12th...
-      [2] (fee_structure_2024.pdf) The annual fee for B.Tech is Rs 85,000...
-      [3] (hostel_rules.pdf) Students may apply for hostel accommodation...
-      Smoke test passed.
-
-### 1.3 Optional: tune chunking parameters
-
-If the smoke test returns irrelevant chunks, try:
-- Reducing chunk_size to 600 (more precise chunks)
-- Increasing chunk_overlap to 200 (better boundary handling)
-- Removing short documents (fewer than 500 words) from data/
-
----
-
-## Phase 2: QLoRA Fine-Tuning (Google Colab)
-
-> "All models are wrong, but some are useful."  -- George E. P. Box
-> Fine-tuning makes your model less wrong on the specific domain
-> that matters to you.
-
-### 2.1 Generate the fine-tuning dataset
-
-Local mode (no API, fastest):
-
-    python generate_dataset.py --mode local --target 300
-
-Groq-assisted mode (higher quality, needs GROQ_API_KEY in .env):
-
-    python generate_dataset.py --mode groq --target 300
-
-This creates:
-    dataset/train.jsonl   (270 records)
-    dataset/eval.jsonl    (30 records)
-
-### 2.2 Upload to Google Drive
-
-Upload the dataset/ folder to your Google Drive at:
-    My Drive / collegebot / dataset /
-
-Upload your college PDFs to:
-    My Drive / collegebot / data /
-
-### 2.3 Open the Colab notebook
-
-1. Go to https://colab.research.google.com
-2. File -> New Notebook
-3. Runtime -> Change runtime type -> T4 GPU -> Save
-4. Copy each cell from notebooks/CollegeBot_Colab.py into Colab cells.
-5. Fill in your HF_TOKEN, GROQ_API_KEY, and HF_USERNAME in the relevant cells.
-6. Runtime -> Run all
-
-### 2.4 What the notebook does
-
-```
-Cell 0  -- Verify T4 GPU is available
-Cell 1  -- Install Unsloth, TRL, PEFT, and all dependencies
-Cell 2  -- Log in to Hugging Face Hub
-Cell 3  -- Set Groq API key
-Cell 4  -- Mount Drive, create directory structure
-Cell 5  -- [Markdown: explanation]
-Cell 6  -- Build FAISS vector store on Colab
-Cell 7  -- Generate synthetic Q-A dataset via Groq
-Cell 8  -- [Markdown: explanation]
-Cell 9  -- Fine-tune Phi-3-mini-4k-instruct (~60-75 min)
-Cell 10 -- Merge adapters and push Phi-3 to HF Hub
-Cell 11 -- [Markdown: explanation]
-Cell 12 -- Fine-tune Mistral-7B-Instruct-v0.3 (~90 min)
-Cell 13 -- Run RAGAS evaluation on both models
+python ingest.py          # build the index from data/  (~1 min)
+streamlit run app.py      # http://localhost:8501
 ```
 
-### 2.5 Key hyperparameters
-
-| Parameter              | Value | Reason                                           |
-|------------------------|-------|--------------------------------------------------|
-| LoRA rank (r)          | 16    | Balances capacity and VRAM usage on T4           |
-| LoRA alpha             | 32    | Standard 2x scaling relative to rank            |
-| Batch size (Phi-3)     | 2     | Fits in 15 GB T4 VRAM with QLoRA                |
-| Batch size (Mistral-7B)| 1     | Mistral-7B is larger; requires smaller batch     |
-| Gradient accumulation  | 4 / 8 | Effective batch size = 8 in both cases          |
-| Learning rate          | 2e-4  | Standard for LoRA fine-tuning on instruction data|
-| Epochs                 | 2     | Sufficient for domain adaptation without overfitting|
-| Temperature (train)    | --    | N/A for fine-tuning; applies at inference        |
-
-### 2.6 After training
-
-Both models will appear on your Hugging Face profile:
-    https://huggingface.co/YOUR_USERNAME/collegebot-phi3-mini
-    https://huggingface.co/YOUR_USERNAME/collegebot-mistral-7b
-
-Update llm_factory.py with your actual username, or set the
-PHI3_MODEL_ID and MISTRAL_MODEL_ID environment variables.
+```bash
+pytest tests/ -q                      # 39 offline tests, no API key needed
+python evaluation/ragas_eval.py       # grounding checks against the real corpus
+```
 
 ---
 
-## Phase 3: Local Development
+## What is in the box
 
-### 3.1 Set up environment
-
-    git clone https://github.com/Techy-A/collegebot-rag.git
-    cd collegebot-rag
-    python -m venv venv
-    source venv/bin/activate       # Windows: venv\Scripts\activate
-    pip install -r requirements.txt
-    cp .env.example .env
-
-Edit .env:
-
-    GROQ_API_KEY=gsk_your_key_here
-    HF_TOKEN=hf_your_token_here
-    PHI3_MODEL_ID=your-username/collegebot-phi3-mini
-    MISTRAL_MODEL_ID=your-username/collegebot-mistral-7b
-    FAISS_PATH=./faiss_store
-
-### 3.2 Run the app
-
-    streamlit run app.py
-
-The app opens at http://localhost:8501
-
-### 3.3 Test the pipeline
-
-In the browser:
-1. Select "groq/llama-3.1-8b-instant" in the sidebar (fastest).
-2. Enable "Show retrieved sources".
-3. Ask: "What is the last date for admission?"
-4. Verify the answer is grounded in your documents.
-5. Enable "Show inline eval scores" to see heuristic metrics.
+| File | Role |
+|---|---|
+| `app.py` | Streamlit UI only — no retrieval logic |
+| `rag.py` | Retrieval, prompt assembly, streaming, retry, logging |
+| `prompts.py` | The grounding prompt — single source of truth for app *and* eval |
+| `llm_factory.py` | LLM backend selection, with an honesty contract (below) |
+| `ingest.py` | Documents → chunks → FAISS, with year tagging and a manifest |
+| `evaluation/gold_set.py` | 39 hand-written Q&A pairs against the real corpus |
+| `evaluation/ragas_eval.py` | Two-layer evaluation harness |
+| `evaluation/quick_score.py` | Sub-10 ms heuristic scores for inline display |
+| `assets/style.css` | The premium black theme |
+| `tests/` | Offline pytest suite |
 
 ---
 
-## Phase 4: Full RAGAS Evaluation
+## Design decisions worth knowing
 
-> "In science, there is only physics; all the rest is stamp collecting."
->   -- Ernest Rutherford
-> In ML, there is only evaluation; all the rest is architecture tuning.
+### The UI never asserts something the system did not do
 
-Run the full evaluation (requires GROQ_API_KEY and the FAISS store):
+- The **status pill** reflects a real health check (index loaded *and* a backend
+  configured), not a hardcoded "ONLINE".
+- The **model chip** names the model that actually answered.
+- A **refusal is styled as a refusal.** An honest "I don't have that" must not
+  look like an answer.
+- The **heuristic scores** are labelled as keyword-overlap heuristics, not
+  presented as verified RAGAS metrics.
+- Message bodies render through `st.markdown()` **without** `unsafe_allow_html`,
+  so neither a question containing `<` nor a PDF chunk containing markup can
+  inject anything into the page.
 
-    python evaluation/ragas_eval.py
+### The LLM factory's honesty contract
 
-Expected output when all targets are met:
+`available_models()` returns only backends that can *actually* be served right
+now. Groq appears when `GROQ_API_KEY` is set; a fine-tuned model appears only
+when its Inference Endpoint URL **and** `HF_TOKEN` are both configured.
+`get_llm()` raises rather than quietly substituting a different model.
 
-    CollegeBot  --  RAGAS Evaluation Report
-    ==============================================================
-    [PASS]  Faithfulness            0.9341  (target >= 0.92)  [##################  ]
-    [PASS]  Answer Relevance        0.8813  (target >= 0.87)  [#################   ]
-    [PASS]  Context Precision       0.9187  (target >= 0.91)  [##################  ]
-    ==============================================================
-    ALL TARGETS MET.  The system is production ready.
+This replaces an earlier design that advertised three models, silently fell back
+to Groq when the two fine-tuned ones could not load, and kept displaying a
+"Phi-3-mini (fine-tuned)" badge over a Groq answer. The QLoRA training code that
+would produce those adapters is in `notebooks/CollegeBot_Colab.py`; until an
+endpoint is deployed, those options simply do not appear in the UI.
 
-If any metric fails, the script prints targeted optimisation tips.
+### Session isolation
 
-### Typical iteration cycle to reach targets
+Only the stateless, expensive objects (embedding model, FAISS index) are cached
+process-wide via `st.cache_resource`. Conversation state lives in
+`st.session_state`.
 
-Iteration 1 (baseline, often slightly below target):
-    Faithfulness:      ~0.88   (3-4 points below target)
-    Answer Relevance:  ~0.84   (3 points below target)
-    Context Precision: ~0.89   (2 points below target)
+This matters: `st.cache_resource` is a **process-global singleton** on Streamlit.
+An earlier version constructed the conversation memory *inside* the cached
+function, so concurrent visitors on the same deployment shared one mutable memory
+buffer and their conversations could bleed into each other's context. The same
+bug also meant moving the temperature slider re-read the whole index from disk,
+and "Clear conversation" called `st.cache_resource.clear()`, evicting the index
+for every other visitor.
 
-Apply fixes:
-    - Add "Answer ONLY from context" to QA_PROMPT (faithfulness +3-4%)
-    - Reduce temperature from 0.20 to 0.05 (faithfulness +1-2%)
-    - Increase fetch_k from 20 to 30 (context precision +1-2%)
-    - Add explicit "directly address the question" instruction (relevance +2%)
+### No `ConversationalRetrievalChain`
 
-Iteration 2 (after fixes, typically meets all targets):
-    Faithfulness:      ~0.93   PASS
-    Answer Relevance:  ~0.89   PASS
-    Context Precision: ~0.92   PASS
+That legacy chain fires an extra condense-question LLM call before retrieval on
+every follow-up turn — two sequential requests per turn against a 30 req/min free
+tier — and it does not stream the final answer cleanly. Retrieve → prompt →
+stream is cheaper and directly streamable. Follow-ups stay retrievable by
+prepending the previous question to the retrieval query, which costs no extra
+API call.
 
----
+### Document versioning
 
-## Phase 5: Deployment on Streamlit Community Cloud
-
-> "Shipping is a feature.  A product that doesn't ship is just a science
->  project."  -- Joel Spolsky
-
-### 5.1 Prepare the GitHub repository
-
-    git init
-    git add .
-    git commit -m "Initial commit: CollegeBot production RAG"
-    git remote add origin https://github.com/Techy-A/collegebot-rag.git
-    git push -u origin main
-
-Important: Do NOT commit .env or .streamlit/secrets.toml.
-Ensure your .gitignore contains:
-
-    .env
-    .streamlit/secrets.toml
-    faiss_store/
-    __pycache__/
-    *.pyc
-    venv/
-    dataset/
-
-The faiss_store/ directory must be committed if you want the app to work
-on Streamlit Cloud without a GPU for re-ingestion.  This is the only
-exception: add faiss_store/ to the repository (or upload it separately).
-
-    git add faiss_store/
-    git commit -m "Add persistent FAISS vector store"
-    git push
-
-### 5.2 Deploy to Streamlit Community Cloud
-
-1. Go to https://share.streamlit.io
-2. Click "New app"
-3. Select your GitHub repository: your-username/collegebot-rag
-4. Set Main file path: app.py
-5. Click "Advanced settings"
-6. Under Secrets, paste (TOML format):
-
-    GROQ_API_KEY = "gsk_your_key"
-    HF_TOKEN     = "hf_your_token"
-    FAISS_PATH   = "./faiss_store"
-
-7. Click "Deploy"
-8. Wait 3-5 minutes for the first deployment to complete.
-
-Your app is now live at:
-    https://your-username-collegebot-rag-app-xxxx.streamlit.app
-
-### 5.3 Optional: HF Inference Endpoints for fine-tuned models
-
-To serve Phi-3 or Mistral-7B on Streamlit Cloud without a GPU:
-
-1. Go to https://huggingface.co/inference-endpoints
-2. Create a new endpoint for YOUR_USERNAME/collegebot-phi3-mini
-3. Choose "CPU Small" (free tier, ~300 ms latency)
-4. Copy the endpoint URL
-5. Add to Streamlit Secrets:
-    PHI3_ENDPOINT_URL = "https://your-endpoint.aws.endpoints.huggingface.cloud"
-
-The LLM factory will automatically detect and use the endpoint URL
-when the "phi3-mini-finetuned" option is selected.
+The corpus contains same-topic documents from different years (a 2025 and a 2026
+fee structure). MMR retrieval *maximises diversity*, so without a year tag it can
+return one chunk from each and the model may blend two years' figures. `ingest.py`
+tags every chunk with an effective year, the prompt instructs the model to prefer
+the most recent and say which year it belongs to, and citations show the year.
+`faiss_store/manifest.json` records what went into the index and when, so
+staleness is observable instead of silent.
 
 ---
 
-## Optimisation Tips Reference
+## Evaluation
 
-| Metric             | If below target, try...                                                   |
-|--------------------|---------------------------------------------------------------------------|
-| Faithfulness       | Strengthen grounding instruction in QA_PROMPT                             |
-|                    | Reduce temperature to 0.05                                                |
-|                    | Increase chunk_overlap to 200                                             |
-|                    | Filter chunks shorter than 50 characters                                  |
-|                    | Fine-tune with more context-grounded examples                             |
-| Answer Relevance   | Add "directly address the question first" to prompt                       |
-|                    | Increase k from 6 to 8                                                    |
-|                    | Diversify synthetic dataset (more question types)                         |
-|                    | Add BM25 hybrid retrieval alongside MMR                                   |
-| Context Precision  | Lower lambda_mult from 0.6 to 0.5 in MMR retriever                       |
-|                    | Reduce chunk_size from 800 to 600                                         |
-|                    | Add metadata filtering by department or document type                     |
-|                    | Add a cross-encoder reranker (cross-encoder/ms-marco-MiniLM-L6 on CPU)   |
-|                    | Remove noisy or off-topic PDFs from data/                                 |
+`evaluation/ragas_eval.py` runs the gold set against the **real** indexed corpus
+using the exact prompt and retrieval config the app serves (both imported, so
+they cannot drift). Two layers:
+
+**Layer 1 — grounding checks (deterministic, no API calls, always runs)**
+
+- `refusal_accuracy` — did it decline exactly when it should have? A **false
+  refusal on an in-corpus question** is a real failure and is reported by name.
+- `fact_recall` — do answers contain the key figures from the source document?
+
+**Layer 2 — RAGAS (opt-in, `--ragas`)**
+
+`faithfulness` / `answer_relevancy` / `context_precision`, LLM-judged.
+
+Two things make this trustworthy that the previous harness got wrong:
+
+1. **The judge is a stronger model than the system under test**
+   (`llama-3.3-70b-versatile` by default). Using the same 8B model as both
+   author and grader invites self-preference bias, and claim decomposition is
+   exactly what small models are weakest at.
+2. **Refusals are excluded from RAGAS averages.** "I don't have that
+   information" is correct behaviour but scores near zero on faithfulness and
+   relevance; including it would hide real generation quality. Refusal
+   correctness is measured properly in layer 1 instead.
+
+RAGAS is opt-in because the free Groq tier allows ~30 requests/minute while RAGAS
+issues on the order of a hundred judge sub-calls, so a full run is slow and prone
+to rate-limit timeouts that silently become NaN → 0.0. Layer 1 gives an honest
+signal on every run.
+
+```bash
+python evaluation/ragas_eval.py                    # layer 1, all 39 items
+python evaluation/ragas_eval.py --ragas --limit 8  # + RAGAS on a subset
+python evaluation/ragas_eval.py --multi-turn       # follow-up scenarios
+```
+
+Results are written to `evaluation/eval_results.json` **and committed on
+purpose** — they record the corpus path, retrieval config, judge model and
+per-question outcomes alongside the scores, so a reader can audit the claim
+rather than take it on trust.
+
+### Optional retrieval upgrade
+
+A cross-encoder reranker is wired in but **off by default** — it should only be
+switched on once the harness shows it helps:
+
+```bash
+USE_RERANKER=1 python evaluation/ragas_eval.py
+```
+
+Change one variable at a time and re-run the harness as a gate.
 
 ---
 
-## Troubleshooting
+## Known limitations
 
-**"FileNotFoundError: No FAISS store found at './faiss_store'"**
-    Run: python ingest.py --sample
-    Then: streamlit run app.py
-
-**"GROQ_API_KEY is not set"**
-    Create a .env file with: GROQ_API_KEY=gsk_your_key_here
-    Or set it in shell: export GROQ_API_KEY=gsk_your_key_here
-
-**"CUDA out of memory" in Colab**
-    Runtime -> Factory reset runtime
-    Set per_device_train_batch_size=1 and gradient_accumulation_steps=8
-
-**RAGAS scores below target after two iterations**
-    1. Add at least 50 real Q-A pairs to the evaluation dataset.
-    2. Review source documents for OCR errors and noise.
-    3. Try running evaluation twice -- Groq outputs vary slightly between runs.
-    4. Add a cross-encoder reranker step between retrieval and generation.
-
-**Streamlit app is slow on first query**
-    This is the FAISS client cold start and the embedding model load.
-    It happens once per session.  Subsequent queries are significantly faster.
+- **Answers are only as current as the documents.** The corpus mixes official
+  PDFs with reference notes compiled from public web sources in July 2026. Fees,
+  deadlines and rankings change every cycle — verify anything with financial or
+  admission consequences against the institution directly.
+- **The free Groq tier is the throughput ceiling** (~30 requests/minute, shared
+  across everyone using a given deployment). Under load, answers are slower and
+  can hit the rate-limit state.
+- **No fine-tuned model is deployed.** See the honesty contract above.
+- **Tabular PDFs are chunked as prose.** Fee tables can be split mid-row by the
+  800-character splitter. Table-aware extraction is the next retrieval
+  improvement worth measuring.
+- **The corpus is trusted.** The prompt has no structural separation between
+  instructions and retrieved text, so do not add unreviewed third-party
+  documents to `data/`.
+- **No conversation persistence.** Refreshing the page starts a new session.
 
 ---
 
-## License
+## Configuration
 
-MIT License.  See LICENSE for details.
+All optional, via `.env` or Streamlit secrets:
 
-> "Make it work, make it right, make it fast."  -- Kent Beck
-> This project prioritises making it work (correctness over performance)
-> and making it right (clean code over clever code).
-> Making it fast is left as an exercise for the reader.
+| Variable | Default | Purpose |
+|---|---|---|
+| `GROQ_API_KEY` | — | Required. Free at console.groq.com |
+| `FAISS_PATH` | `./faiss_store` | Index location |
+| `GROQ_MODEL` | `llama-3.1-8b-instant` | Serving model |
+| `JUDGE_MODEL` | `llama-3.3-70b-versatile` | RAGAS judge |
+| `RETRIEVAL_K` | `6` | Passages passed to the model |
+| `RETRIEVAL_FETCH_K` | `30` | MMR candidate pool |
+| `USE_RERANKER` | off | Cross-encoder reranking |
+| `LOG_LEVEL` | `INFO` | stdout logging |
+| `HF_TOKEN`, `PHI3_ENDPOINT_URL`, `MISTRAL_ENDPOINT_URL` | — | Fine-tuned backends |
+
+---
+
+## Deploying to Streamlit Community Cloud
+
+1. Commit `faiss_store/` (the index must ship — there is no GPU to rebuild it).
+2. Point a new Streamlit Cloud app at `app.py`.
+3. Under **Secrets**, add:
+   ```toml
+   GROQ_API_KEY = "gsk_your_key"
+   FAISS_PATH   = "./faiss_store"
+   ```
+4. Note that free Streamlit apps sleep after inactivity, so a cold link shows a
+   wake-up screen first.
+
+Never commit `.env` or `.streamlit/secrets.toml`.
+
+---
+
+## Licence
+
+MIT — see [LICENSE](LICENSE). Note that the documents under `data/` are
+third-party institutional material and are **not** covered by that licence;
+verify redistribution rights before publishing the repository.

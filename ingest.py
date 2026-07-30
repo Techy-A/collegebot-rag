@@ -20,28 +20,58 @@ Usage:
     python ingest.py --data ./my_docs --faiss ./my_faiss_store
 """
 
+import argparse
+import datetime
+import hashlib
+import json
 import os
+import re
 import sys
 import time
-import argparse
 from pathlib import Path
 from typing import List
 
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ------------------------------------------------------------------
 # Configuration defaults
 # ------------------------------------------------------------------
-DEFAULT_DATA_DIR   = "./data"
+DEFAULT_DATA_DIR = "./data"
 DEFAULT_FAISS_PATH = "./faiss_store"
-DEFAULT_EMBED_MODEL= "sentence-transformers/all-MiniLM-L6-v2"
-CHUNK_SIZE         = 800
-CHUNK_OVERLAP      = 150
-BATCH_SIZE         = 500
+DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 150
+BATCH_SIZE = 500
+
+
+# ------------------------------------------------------------------
+# Document versioning
+# ------------------------------------------------------------------
+# The corpus carries several same-topic documents from different years
+# (e.g. Fee-Structure-2025-2.pdf alongside fee-structure-2026.pdf).  MMR
+# retrieval maximises diversity, so without a year tag it can return one chunk
+# from each and the model may blend two years' figures into one answer.
+# Tagging the effective year lets the prompt prefer the most recent source and
+# lets the UI show which year a citation belongs to.
+# ------------------------------------------------------------------
+YEAR_RE = re.compile(r"(20\d{2})")
+
+
+def effective_year(filename: str) -> int:
+    """Best-effort academic year for a document, from its filename.  0 if none."""
+    years = [int(y) for y in YEAR_RE.findall(filename)]
+    return max(years) if years else 0
+
+
+def file_digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(65536), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 # ------------------------------------------------------------------
@@ -51,43 +81,84 @@ def load_documents(data_dir: Path) -> List[Document]:
     """
     Walk data_dir recursively and load all supported documents.
     Errors on individual files are caught without aborting the run.
+    Byte-identical duplicates are skipped, and every chunk is tagged with the
+    document's effective year.
     """
     from langchain_community.document_loaders import (
-        PyPDFLoader,
         Docx2txtLoader,
+        PyPDFLoader,
         TextLoader,
         UnstructuredHTMLLoader,
     )
 
     loader_map = {
-        ".pdf" : PyPDFLoader,
+        ".pdf": PyPDFLoader,
         ".docx": Docx2txtLoader,
-        ".txt" : TextLoader,
+        ".txt": TextLoader,
         ".html": UnstructuredHTMLLoader,
     }
 
     all_docs: List[Document] = []
-    found = list(data_dir.rglob("*.*"))
+    seen_digests = {}
+    found = sorted(data_dir.rglob("*.*"))
     print(f"\nScanning {data_dir} -- found {len(found)} files total.")
 
     for fpath in found:
         ext = fpath.suffix.lower()
         if ext not in loader_map:
             continue
+
+        digest = file_digest(fpath)
+        if digest in seen_digests:
+            print(f"  DUPE    {fpath.name}  -- identical to {seen_digests[digest]}, skipped")
+            continue
+        seen_digests[digest] = fpath.name
+
         try:
             loader = loader_map[ext](str(fpath))
-            docs   = loader.load()
+            docs = loader.load()
+            year = effective_year(fpath.name)
             for doc in docs:
-                doc.metadata["source"]    = str(fpath)
+                doc.metadata["source"] = str(fpath)
                 doc.metadata["file_name"] = fpath.name
                 doc.metadata["file_type"] = ext
+                if year:
+                    doc.metadata["effective_year"] = year
             all_docs.extend(docs)
-            print(f"  Loaded  {fpath.name}  ({len(docs)} section(s))")
+            tag = f"  [{year}]" if year else ""
+            print(f"  Loaded  {fpath.name}  ({len(docs)} section(s)){tag}")
         except Exception as e:
             print(f"  SKIP    {fpath.name}  -- {e}")
 
-    print(f"\nTotal documents loaded: {len(all_docs)}")
+    print(f"\nTotal documents loaded: {len(all_docs)}  (from {len(seen_digests)} unique files)")
     return all_docs
+
+
+def write_manifest(faiss_path: str, docs: List[Document], n_chunks: int) -> None:
+    """
+    Record what went into the index so staleness is observable rather than
+    silent.  Without this, "when was this last re-ingested?" is unanswerable.
+    """
+    files = {}
+    for doc in docs:
+        name = doc.metadata.get("file_name", "?")
+        entry = files.setdefault(name, {"sections": 0})
+        entry["sections"] += 1
+        if doc.metadata.get("effective_year"):
+            entry["effective_year"] = doc.metadata["effective_year"]
+
+    manifest = {
+        "built_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "embed_model": DEFAULT_EMBED_MODEL,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+        "n_documents": len(docs),
+        "n_chunks": n_chunks,
+        "files": files,
+    }
+    out = Path(faiss_path) / "manifest.json"
+    out.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"Manifest written to {out}")
 
 
 # ------------------------------------------------------------------
@@ -95,8 +166,8 @@ def load_documents(data_dir: Path) -> List[Document]:
 # ------------------------------------------------------------------
 def split_documents(
     docs: List[Document],
-    chunk_size: int   = CHUNK_SIZE,
-    chunk_overlap: int= CHUNK_OVERLAP,
+    chunk_size: int = CHUNK_SIZE,
+    chunk_overlap: int = CHUNK_OVERLAP,
 ) -> List[Document]:
     """
     Split documents into overlapping chunks.
@@ -104,10 +175,10 @@ def split_documents(
     fully represented in at least one adjacent chunk.
     """
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size      = chunk_size,
-        chunk_overlap   = chunk_overlap,
-        separators      = ["\n\n", "\n", ". ", "! ", "? ", " ", ""],
-        length_function = len,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+        length_function=len,
     )
     chunks = splitter.split_documents(docs)
     print(f"\nChunks after splitting: {len(chunks)}")
@@ -118,9 +189,9 @@ def split_documents(
 # FAISS vector store construction
 # ------------------------------------------------------------------
 def build_vectorstore(
-    chunks    : List[Document],
+    chunks: List[Document],
     faiss_path: str = DEFAULT_FAISS_PATH,
-    embed_model: str= DEFAULT_EMBED_MODEL,
+    embed_model: str = DEFAULT_EMBED_MODEL,
 ) -> FAISS:
     """
     Embed chunks with all-MiniLM-L6-v2 and save a FAISS index.
@@ -131,13 +202,13 @@ def build_vectorstore(
     """
     print(f"\nLoading embedding model: {embed_model}")
     embeddings = HuggingFaceEmbeddings(
-        model_name    = embed_model,
-        model_kwargs  = {"device": "cpu"},
-        encode_kwargs = {"normalize_embeddings": True},
+        model_name=embed_model,
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
     )
     print("Embedding model loaded.  Vector dimension: 384")
 
-    print(f"\nBuilding FAISS index...")
+    print("\nBuilding FAISS index...")
     t0 = time.time()
 
     # Build the FAISS index from the first batch.
@@ -145,7 +216,7 @@ def build_vectorstore(
 
     # Add remaining batches incrementally.
     for i in range(BATCH_SIZE, len(chunks), BATCH_SIZE):
-        batch     = chunks[i : i + BATCH_SIZE]
+        batch = chunks[i : i + BATCH_SIZE]
         batch_num = i // BATCH_SIZE + 1
         print(f"  Adding batch {batch_num} ({len(batch)} chunks)...")
         vectorstore.add_documents(batch)
@@ -168,14 +239,15 @@ def verify(vectorstore: FAISS) -> None:
     print("\nVerification -- MMR retrieval smoke test:")
     results = vectorstore.max_marginal_relevance_search(
         "What are the admission requirements?",
-        k=3, fetch_k=10,
+        k=3,
+        fetch_k=10,
     )
     if not results:
         print("  WARNING: No results returned.  Check your documents.")
         return
     for i, doc in enumerate(results, 1):
         preview = doc.page_content[:100].replace("\n", " ").strip()
-        src     = doc.metadata.get("file_name", "?")
+        src = doc.metadata.get("file_name", "?")
         print(f"  [{i}] ({src}) {preview}...")
     print("  Smoke test passed.")
 
@@ -275,15 +347,15 @@ For urgent issues, contact the Student Welfare Officer at welfare@college.edu.
 # ------------------------------------------------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="Build CollegeBot FAISS vector store.")
-    p.add_argument("--data",   default=DEFAULT_DATA_DIR,   help="Path to documents folder.")
-    p.add_argument("--faiss",  default=DEFAULT_FAISS_PATH, help="Path to FAISS output folder.")
-    p.add_argument("--model",  default=DEFAULT_EMBED_MODEL,help="Embedding model name.")
-    p.add_argument("--sample", action="store_true",        help="Create sample data if data/ is empty.")
+    p.add_argument("--data", default=DEFAULT_DATA_DIR, help="Path to documents folder.")
+    p.add_argument("--faiss", default=DEFAULT_FAISS_PATH, help="Path to FAISS output folder.")
+    p.add_argument("--model", default=DEFAULT_EMBED_MODEL, help="Embedding model name.")
+    p.add_argument("--sample", action="store_true", help="Create sample data if data/ is empty.")
     return p.parse_args()
 
 
 if __name__ == "__main__":
-    args     = parse_args()
+    args = parse_args()
     data_dir = Path(args.data)
 
     print("CollegeBot -- Data Ingestion Pipeline (FAISS)")
@@ -293,7 +365,7 @@ if __name__ == "__main__":
         print("Creating sample data...")
         create_sample_data(data_dir)
 
-    docs   = load_documents(data_dir)
+    docs = load_documents(data_dir)
     chunks = split_documents(docs)
 
     if not chunks:
@@ -302,6 +374,7 @@ if __name__ == "__main__":
 
     vs = build_vectorstore(chunks, args.faiss, args.model)
     verify(vs)
+    write_manifest(args.faiss, docs, len(chunks))
 
     print("\nIngestion complete.")
     print(f"  Documents : {len(docs)}")

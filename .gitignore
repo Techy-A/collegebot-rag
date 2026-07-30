@@ -11,7 +11,6 @@ venv/
 env/
 .venv/
 collegebot_env/
-collegebot-rag/
 
 # Generated artefacts (large; push separately or regenerate)
 dataset/
@@ -28,9 +27,17 @@ dataset/
 *.safetensors
 *.gguf
 
-# Evaluation outputs (optional; commit if you want audit trail)
-evaluation/ragas_results.json
-evaluation/ragas_results.csv
+# Evaluation outputs ARE committed on purpose.
+# A metric nobody can reproduce or audit is not evidence.  evaluation/
+# eval_results.json records the corpus path, retrieval config, judge model and
+# per-question outcomes alongside the scores, so a reader can check the claim
+# instead of taking it on trust.
+
+# Tooling caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
 
 # IDE
 .vscode/

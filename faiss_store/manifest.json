@@ -1,0 +1,87 @@
+{
+  "built_at": "2026-07-30T16:59:00",
+  "embed_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "chunk_size": 800,
+  "chunk_overlap": 150,
+  "n_documents": 727,
+  "n_chunks": 2185,
+  "files": {
+    "AC ODD 2025-26_UG-II, III, IV, PG.pdf": {
+      "sections": 1,
+      "effective_year": 2025
+    },
+    "AC-EVEN-2025-26_UG-PG.pdf": {
+      "sections": 2,
+      "effective_year": 2025
+    },
+    "Admission to MCA program.pdf": {
+      "sections": 12
+    },
+    "Admission to MSc programs.pdf": {
+      "sections": 8
+    },
+    "Admission to PhD programs.pdf": {
+      "sections": 17
+    },
+    "BECOURSES_SCHEME16.pdf": {
+      "sections": 135
+    },
+    "Course_Scheme_and_Syllabi_eied.pdf": {
+      "sections": 165
+    },
+    "Fee-Structure-2025-2.pdf": {
+      "sections": 1,
+      "effective_year": 2025
+    },
+    "HOSTEL FACILITIES (1).pdf": {
+      "sections": 2
+    },
+    "Hostel Facilities.pdf": {
+      "sections": 3
+    },
+    "Liberal_Arts_and_Sciences_Prospectus.pdf": {
+      "sections": 10
+    },
+    "SSR_NAAC_2018_FINALnew.pdf": {
+      "sections": 117,
+      "effective_year": 2018
+    },
+    "THAPAR-TRINITY 22 PROSPECTUS.pdf": {
+      "sections": 9
+    },
+    "TICC Annual Report.pdf": {
+      "sections": 231
+    },
+    "TUITION FEE AND OTHER DUES.pdf": {
+      "sections": 5
+    },
+    "fee-structure-2026.pdf": {
+      "sections": 1,
+      "effective_year": 2026
+    },
+    "thapar_academics_and_programs.txt": {
+      "sections": 1
+    },
+    "thapar_admissions.txt": {
+      "sections": 1
+    },
+    "thapar_fees_and_scholarships.txt": {
+      "sections": 1
+    },
+    "thapar_hostel_and_campus.txt": {
+      "sections": 1
+    },
+    "thapar_overview_and_rankings.txt": {
+      "sections": 1
+    },
+    "thapar_placements.txt": {
+      "sections": 1
+    },
+    "thapar_research_and_innovation.txt": {
+      "sections": 1
+    },
+    "thapar_student_life_and_contact.txt": {
+      "sections": 1
+    }
+  }
+}

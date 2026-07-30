@@ -37,16 +37,17 @@ Author : CollegeBot Team
 License: MIT
 """
 
-import os
-import re
-import json
-import time
-import random
 import argparse
+import json
+import os
+import random
+import re
+import time
 from pathlib import Path
-from typing import List, Dict
+from typing import Dict, List
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 
@@ -104,11 +105,31 @@ def generate_local(chunks: List[str], target: int) -> List[Dict]:
         -- Donald Knuth
     """
     key_nouns = [
-        "fee", "fees", "scholarship", "admission", "attendance",
-        "hostel", "library", "deadline", "examination", "registration",
-        "document", "documents", "certificate", "grievance", "marks",
-        "internship", "placement", "canteen", "sports", "club",
-        "semester", "syllabus", "result", "revaluation", "condonation",
+        "fee",
+        "fees",
+        "scholarship",
+        "admission",
+        "attendance",
+        "hostel",
+        "library",
+        "deadline",
+        "examination",
+        "registration",
+        "document",
+        "documents",
+        "certificate",
+        "grievance",
+        "marks",
+        "internship",
+        "placement",
+        "canteen",
+        "sports",
+        "club",
+        "semester",
+        "syllabus",
+        "result",
+        "revaluation",
+        "condonation",
     ]
 
     records = []
@@ -130,19 +151,21 @@ def generate_local(chunks: List[str], target: int) -> List[Dict]:
                     else:
                         question = template.format(topic=noun)
 
-                    records.append({
-                        "instruction": question,
-                        "input"      : "",
-                        "output"     : sent.strip(),
-                    })
-                    break   # one record per sentence is sufficient
+                    records.append(
+                        {
+                            "instruction": question,
+                            "input": "",
+                            "output": sent.strip(),
+                        }
+                    )
+                    break  # one record per sentence is sufficient
 
         if len(records) >= target:
             break
 
     # Deduplicate on (instruction, output) pairs.
-    seen    = set()
-    unique  = []
+    seen = set()
+    unique = []
     for r in records:
         key = (r["instruction"], r["output"][:60])
         if key not in seen:
@@ -192,7 +215,7 @@ def generate_groq(chunks: List[str], target: int) -> List[Dict]:
 
     api_key = os.getenv("GROQ_API_KEY", "")
     if not api_key:
-        raise EnvironmentError(
+        raise OSError(
             "GROQ_API_KEY not set.  Cannot use Groq-assisted generation.  "
             "Use --mode local instead, or set GROQ_API_KEY in .env."
         )
@@ -203,7 +226,17 @@ def generate_groq(chunks: List[str], target: int) -> List[Dict]:
     # How many questions to request per chunk.
     qs_per_chunk = 3
 
+    # Pace to the real budget.  Each call costs roughly 250 prompt tokens plus up
+    # to 600 completion tokens, so ~850 total.  Against 6,000 tokens/minute that
+    # is about 7 calls/minute -- one every ~9 seconds.  The previous 1-second
+    # sleep implied ~48,000 tokens/minute, twelve times over the ceiling, so the
+    # run would spend most of its time being refused.
+    tokens_per_call = 850
+    tpm_budget = int(os.getenv("GROQ_TPM", "6000"))
+    pace = max(1.0, 60.0 / max(1, tpm_budget // tokens_per_call))
+
     print(f"\n  Requesting ~{qs_per_chunk} Q-A pairs per chunk from Groq LLM...")
+    print(f"  Pacing: one call every {pace:.1f}s to stay inside {tpm_budget} tokens/minute.")
 
     for i, chunk in enumerate(chunks):
         if len(records) >= target:
@@ -223,21 +256,35 @@ TEXT:
 
 Generate {qs_per_chunk} Q-A pairs:"""
 
-        try:
-            response = client.chat.completions.create(
-                model       = "llama-3.1-8b-instant",
-                messages    = [{"role": "user", "content": prompt}],
-                temperature = 0.7,
-                max_tokens  = 600,
-            )
-            text = response.choices[0].message.content or ""
-            pairs = _parse_qa_pairs(text)
-            records.extend(pairs)
-            print(f"  Chunk {i+1}/{len(chunks)}: extracted {len(pairs)} pairs ({len(records)} total)")
-        except Exception as e:
-            print(f"  Chunk {i+1}: Groq error -- {e}")
+        # Retry rate limits instead of dropping the chunk.  Without this a single
+        # 429 silently discarded three training pairs, so a throttled run
+        # produced a dataset with unexplained holes in it.
+        text = ""
+        for attempt in range(4):
+            try:
+                response = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    max_tokens=600,
+                )
+                text = response.choices[0].message.content or ""
+                break
+            except Exception as e:  # noqa: BLE001 - provider errors are untyped
+                msg = str(e)
+                if "429" not in msg and "rate limit" not in msg.lower():
+                    print(f"  Chunk {i + 1}: Groq error -- {msg[:120]}")
+                    break
+                hinted = re.search(r"try again in ([0-9.]+)s", msg, re.IGNORECASE)
+                wait = min(float(hinted.group(1)) if hinted else pace * (attempt + 1), 65.0)
+                print(f"  Chunk {i + 1}: rate limited, waiting {wait:.1f}s")
+                time.sleep(wait)
 
-        time.sleep(1.0)   # Stay under the 6,000 tokens/minute free rate limit.
+        pairs = _parse_qa_pairs(text)
+        records.extend(pairs)
+        print(f"  Chunk {i + 1}/{len(chunks)}: extracted {len(pairs)} pairs ({len(records)} total)")
+
+        time.sleep(pace)
 
     random.shuffle(records)
     return records[:target]
@@ -246,23 +293,41 @@ Generate {qs_per_chunk} Q-A pairs:"""
 def _parse_qa_pairs(text: str) -> List[Dict]:
     """
     Parse "Q: ... A: ..." formatted text into structured records.
-    Handles minor formatting variations that the LLM sometimes produces.
+
+    Answers are accumulated across lines until the next Q: or the end of the
+    text.  The earlier version assigned only the single line the "A:" prefix sat
+    on, so every multi-line answer -- which is most of the useful ones, since the
+    prompt asks for bullet points -- was silently truncated to its first line.
+    Training on truncated answers teaches the model to stop mid-thought.
     """
-    pairs   = []
-    lines   = text.strip().split("\n")
-    current = {}
+    pairs = []
+    current = None
+    answer_lines: List[str] = []
 
-    for line in lines:
-        line = line.strip()
-        if line.lower().startswith("q:") or line.lower().startswith("question:"):
-            current = {"instruction": re.sub(r"^q(?:uestion)?:\s*", "", line, flags=re.IGNORECASE).strip(),
-                       "input": "", "output": ""}
-        elif (line.lower().startswith("a:") or line.lower().startswith("answer:")) and current:
-            current["output"] = re.sub(r"^a(?:nswer)?:\s*", "", line, flags=re.IGNORECASE).strip()
-            if current["instruction"] and current["output"]:
-                pairs.append(dict(current))
-            current = {}
+    def flush():
+        if current and current["instruction"] and answer_lines:
+            body = "\n".join(answer_lines).strip()
+            if body:
+                pairs.append({**current, "output": body})
 
+    for raw in text.strip().split("\n"):
+        line = raw.strip()
+        low = line.lower()
+        if low.startswith(("q:", "question:")):
+            flush()
+            current = {
+                "instruction": re.sub(r"^q(?:uestion)?:\s*", "", line, flags=re.IGNORECASE).strip(),
+                "input": "",
+                "output": "",
+            }
+            answer_lines = []
+        elif low.startswith(("a:", "answer:")) and current:
+            answer_lines = [re.sub(r"^a(?:nswer)?:\s*", "", line, flags=re.IGNORECASE).strip()]
+        elif current is not None and answer_lines and line:
+            # Continuation of the current answer (bullet points, wrapped prose).
+            answer_lines.append(line)
+
+    flush()
     return pairs
 
 
@@ -277,9 +342,9 @@ def save_dataset(records: List[Dict], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     random.shuffle(records)
 
-    split     = int(len(records) * 0.9)
+    split = int(len(records) * 0.9)
     train_set = records[:split]
-    eval_set  = records[split:]
+    eval_set = records[split:]
 
     for name, rows in [("train", train_set), ("eval", eval_set)]:
         path = out_dir / f"{name}.jsonl"
@@ -300,14 +365,19 @@ def save_dataset(records: List[Dict], out_dir: Path) -> None:
 # ------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic fine-tuning dataset.")
-    parser.add_argument("--mode",   choices=["local", "groq"], default="local",
-                        help="Generation mode.  'local' requires no API.  'groq' uses the free Groq API.")
-    parser.add_argument("--target", type=int, default=300,
-                        help="Target number of Q-A pairs to generate.")
-    parser.add_argument("--data",   default="./data",
-                        help="Path to documents folder (same as ingest.py).")
-    parser.add_argument("--out",    default="./dataset",
-                        help="Output directory for JSONL files.")
+    parser.add_argument(
+        "--mode",
+        choices=["local", "groq", "curated"],
+        default="local",
+        help="Generation mode.  'local' requires no API.  'groq' uses the free Groq API.",
+    )
+    parser.add_argument(
+        "--target", type=int, default=300, help="Target number of Q-A pairs to generate."
+    )
+    parser.add_argument(
+        "--data", default="./data", help="Path to documents folder (same as ingest.py)."
+    )
+    parser.add_argument("--out", default="./dataset", help="Output directory for JSONL files.")
     args = parser.parse_args()
 
     print("\nCollegeBot Dataset Generator")
@@ -316,12 +386,37 @@ def main():
     print(f"  Target : {args.target} Q-A pairs")
     print(f"  Source : {args.data}")
 
+    # Curated mode needs no corpus scan: the pairs are hand-authored, each one
+    # already carrying its grounding passage.  See curated_dataset.py for why
+    # this exists rather than relying on either generator.
+    if args.mode == "curated":
+        from curated_dataset import build_records, summary
+
+        records = build_records()
+        stats = summary()
+        print(
+            f"\n  Curated set: {stats['grounded']} grounded + {stats['refusals']} refusal "
+            f"= {stats['total']} pairs ({stats['refusal_share_pct']}% refusals)"
+        )
+        print("\n  Sample records:")
+        print("  " + "-" * 58)
+        for r in records[:2]:
+            print(f"  Q: {r['instruction']}")
+            print(f"  context: {r['input'][:70]}...")
+            print(f"  A: {r['output'][:90]}...")
+            print()
+        save_dataset(records, Path(args.out))
+        print("\nDataset generation complete.")
+        print("  Next step: upload dataset/ to Google Drive, then run the Colab notebook.")
+        return
+
     # Load raw text from the same document set as ingest.py.
     from ingest import load_documents, split_documents
+
     data_dir = Path(args.data)
-    docs     = load_documents(data_dir)
-    chunks   = split_documents(docs)
-    texts    = [c.page_content for c in chunks]
+    docs = load_documents(data_dir)
+    chunks = split_documents(docs)
+    texts = [c.page_content for c in chunks]
 
     if not texts:
         print("ERROR: No text extracted from data/.  Check your documents.")
@@ -346,7 +441,7 @@ def main():
 
     save_dataset(records, Path(args.out))
     print("\nDataset generation complete.")
-    print(f"  Next step: upload dataset/ to Google Drive, then run the Colab notebook.")
+    print("  Next step: upload dataset/ to Google Drive, then run the Colab notebook.")
 
 
 if __name__ == "__main__":

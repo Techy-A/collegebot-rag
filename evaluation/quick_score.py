@@ -28,14 +28,14 @@ License: MIT
 """
 
 import re
-from typing import List, Dict
+from typing import Dict, List
 
 from langchain.schema import Document
 
 
 def quick_evaluate(
-    question   : str,
-    answer     : str,
+    question: str,
+    answer: str,
     source_docs: List[Document],
 ) -> Dict[str, float]:
     """
@@ -53,8 +53,8 @@ def quick_evaluate(
     Values are floats in [0.0, 1.0].
     """
     return {
-        "faithfulness"     : _faithfulness(answer, source_docs),
-        "answer_relevance" : _answer_relevance(question, answer),
+        "faithfulness": _faithfulness(answer, source_docs),
+        "answer_relevance": _answer_relevance(question, answer),
         "context_precision": _context_precision(question, source_docs),
     }
 
@@ -94,7 +94,7 @@ def _faithfulness(answer: str, docs: List[Document]) -> float:
     for sent in sentences:
         # Retain only words with four or more characters to ignore
         # function words (a, the, is, of) which appear universally.
-        content_words = [w for w in re.findall(r"\b\w{4,}\b", sent.lower())]
+        content_words = list(re.findall(r"\b\w{4,}\b", sent.lower()))
         if not content_words:
             matched += 1
             continue
@@ -132,8 +132,8 @@ def _answer_relevance(question: str, answer: str) -> float:
         return 0.88
 
     overlap = q_words & a_words
-    raw     = len(overlap) / len(q_words)
-    scaled  = min(1.0, raw * 1.5)
+    raw = len(overlap) / len(q_words)
+    scaled = min(1.0, raw * 1.5)
     return round(max(0.50, scaled), 4)
 
 
