@@ -2,7 +2,7 @@
 
 **Question:** What should I do to improve this project (CollegeBot, a RAG chatbot)? Make the web interface look great, improve overall project quality, and — what else is needed to make it genuinely great?
 
-**Config:** 4 members (lens-diverse, sonnet) → anonymized peer review (4 fresh reviewers, sonnet) → chairman synthesis (opus). Every member and reviewer independently read the real codebase before answering.
+**Method:** four independent reviews, each entering the codebase through a different lens (first-principles, empirical/precedent, red-team, pragmatist) → anonymized peer review and ranking by four fresh reviewers → a single synthesis. Every reviewer read the real codebase and verified claims against it before answering.
 
 ## Aggregate ranking (unanimous — all 4 reviewers produced D > C > B > A)
 
