@@ -1,4 +1,4 @@
-# CollegeBot — build report
+# CollegeBot - build report
 
 **Date:** 2026-07-30 · macOS · Python 3.9.6 · Groq free tier
 **Scope:** all phases of the LLM-council plan ([council-improvements.md](council-improvements.md)),
@@ -10,9 +10,9 @@ plus wider Thapar data and a premium black interface.
 
 | Area | Before | After |
 |---|---|---|
-| Session isolation | Conversation memory built inside `@st.cache_resource` — a process-global singleton, so concurrent visitors shared one mutable buffer | Only the stateless index is cached; memory lives in `st.session_state` |
+| Session isolation | Conversation memory built inside `@st.cache_resource` - a process-global singleton, so concurrent visitors shared one mutable buffer | Only the stateless index is cached; memory lives in `st.session_state` |
 | Model selector | 3 options; 2 silently fell back to Groq while the badge claimed "Phi-3-mini (fine-tuned)" | Only backends that can actually be served are listed; `get_llm()` raises rather than substituting |
-| Response delivery | `streaming=False` — a spinner, then the whole answer | Token-by-token via `st.write_stream` |
+| Response delivery | `streaming=False` - a spinner, then the whole answer | Token-by-token via `st.write_stream` |
 | Chat rendering | Raw f-string interpolation into `unsafe_allow_html` divs (XSS surface; markdown bullets broke) | Native `st.chat_message` + `st.markdown()`, no HTML injection path |
 | Citations | Bare filename chips | Numbered, expandable cards with human-readable title, **page number**, source year and the retrieved snippet |
 | Refusals | Styled identically to answers | First-class amber "not in the knowledge base" state |
@@ -48,7 +48,7 @@ being served as real answers. Eight researched documents were added, covering:
 Every document ends with the source URLs it was built from. Figures are labelled with
 their year, because fees and rankings change annually.
 
-The synthetic fixture was moved to `_fixtures/` — out of the index, still regenerable
+The synthetic fixture was moved to `_fixtures/` - out of the index, still regenerable
 via `ingest.py --sample` for tests. **This single change fixed a live wrong answer:**
 "What are the library opening hours?" previously returned the fixture's invented
 "Monday to Saturday, 8:00 AM to 8:00 PM"; it now correctly returns "open 24 hours a
@@ -58,11 +58,11 @@ day, on all 365 days of the year".
 
 ## 3. The interface
 
-Kept black, as asked — but rebuilt for depth rather than outlines.
+Kept black, as asked - but rebuilt for depth rather than outlines.
 
 - **Layered near-blacks** (`#08080A` canvas over `#0E0E12` / `#15151B` / `#1D1D24`
   surfaces) with a single soft overhead glow, instead of boxes drawn in borders.
-- **Hairline borders** at 6–16% white — structure you feel rather than see.
+- **Hairline borders** at 6–16% white - structure you feel rather than see.
 - **One metallic accent.** A champagne gradient carries the wordmark; indigo is
   reserved for interaction; emerald is reserved *exclusively* for "this is grounded"
   (the status dot and citation numbers). Restraint is what reads as premium.
@@ -71,8 +71,8 @@ Kept black, as asked — but rebuilt for depth rather than outlines.
 - **Glass input bar** with a champagne focus ring.
 - **Assistant turns** sit on a raised card; user turns stay on the canvas, so the eye
   lands on answers.
-- **Accessibility fixed:** body text moved from `#52525B` (≈2.6:1 — failed WCAG AA) to
-  `#8B8B94` (≈5.4:1 — passes). `prefers-reduced-motion` respected; mobile breakpoint added.
+- **Accessibility fixed:** body text moved from `#52525B` (≈2.6:1 - failed WCAG AA) to
+  `#8B8B94` (≈5.4:1 - passes). `prefers-reduced-motion` respected; mobile breakpoint added.
 - Streamlit's default full-colour emoji avatars are desaturated to monochrome chips.
 
 Everything lives in `assets/style.css` rather than a 100-line inline `<style>` block.
@@ -91,10 +91,10 @@ context at all?* (35 answerable gold questions, no LLM calls, so it is fast and 
 
 | Configuration | Fact reaches context | Added latency |
 |---|---|---|
-| MMR k=6 fetch_k=30 (**previous default**) | 77.1% | — |
-| similarity k=6 | 68.6% | — |
-| BM25 only, k=8 | 80.0% | — |
-| MMR k=8 fetch_k=60 | 80.0% | — |
+| MMR k=6 fetch_k=30 (**previous default**) | 77.1% | - |
+| similarity k=6 | 68.6% | - |
+| BM25 only, k=8 | 80.0% | - |
+| MMR k=8 fetch_k=60 | 80.0% | - |
 | similarity(40) + cross-encoder → 6 | 85.7% | ~1.3 s/query |
 | similarity(60) + cross-encoder → 8 | 88.6% | ~2.0 s/query |
 | **hybrid dense + BM25 (RRF) → 8** | **88.6%** | **none** |
@@ -143,7 +143,7 @@ What survives that scrutiny:
   together) but its magnitude is unreliable. It was reverted.
 
 The harness has since been changed to **temperature 0.0** so future comparisons are
-reproducible. That fix landed after these runs, so the numbers above retain the noise —
+reproducible. That fix landed after these runs, so the numbers above retain the noise -
 saying so is more useful than presenting a clean-looking table that cannot be reproduced.
 
 **Honest bottom line:** fact recall sits around 0.74–0.77 against a 0.85 target, refusal
@@ -163,7 +163,7 @@ current curated ones.
 
 Surfacing each passage's year to the model and adding explicit exact-figure and recency
 rules recovered part of this (+5.7 points in round 3). Fully closing it needs
-per-document authority weighting at retrieval time — down-ranking a 2018 self-study
+per-document authority weighting at retrieval time - down-ranking a 2018 self-study
 report when a 2025 source covers the same fact. That is the next measured change, and it
 is deliberately left un-guessed rather than shipped untested.
 
@@ -171,15 +171,15 @@ is deliberately left un-guessed rather than shipped untested.
 
 ## 6. Engineering
 
-- **51 offline tests** — no API key, no vector store. They cover refusal detection,
+- **51 offline tests** - no API key, no vector store. They cover refusal detection,
   follow-up query construction, citation formatting (including 0-indexed → 1-indexed
   page numbers), prompt assembly, RRF fusion, the rate-limit retry path, ingest year
-  tagging and digest dedup, and — most importantly — the factory's honesty contract:
+  tagging and digest dedup, and - most importantly - the factory's honesty contract:
   *a model must never be offered unless it can actually be served.*
 - **CI** (`.github/workflows/ci.yml`): ruff lint + format check + pytest on every push.
 - **Lint**: `ruff check` clean, `ruff format` applied across 15 files.
 - **Structured logging** to stdout (query latency, passage count, refusals, rate-limit
-  retries) — this is what made the false-refusal pattern visible.
+  retries) - this is what made the false-refusal pattern visible.
 - **`faiss_store/manifest.json`** records build time, embedding model, chunk settings and
   per-file effective years, so index staleness is observable rather than silent.
 
@@ -188,7 +188,7 @@ is deliberately left un-guessed rather than shipped untested.
 1. **Streamlit rejects non-emoji avatars.** `st.chat_message(avatar="◆")` raises
    `StreamlitAPIException`. Switched to Streamlit's built-in icons, restyled in CSS.
 2. **`st.rerun()` before the state append.** In the refusal path the record was appended
-   *after* `st.rerun()`, which raises immediately — so refusals would have vanished from
+   *after* `st.rerun()`, which raises immediately - so refusals would have vanished from
    the transcript. The append now happens first.
 
 ---
@@ -202,7 +202,7 @@ is deliberately left un-guessed rather than shipped untested.
   final run ("What is the B.Tech fee at IIT Delhi?", "What is my personal exam roll
   number?"). Earlier runs declined both. This is exactly the failure mode the refusal
   metric exists to catch, and it is not fixed.
-- **The free Groq tier is the binding constraint** — roughly 30 requests/minute, shared
+- **The free Groq tier is the binding constraint** - roughly 30 requests/minute, shared
   across all users of a deployment. A full 39-question evaluation takes ~10 minutes at
   ~13–18 s per question, and RAGAS (layer 2) is opt-in for that reason.
 - **RAGAS layer 2 was not run in this session.** Layer 1 (deterministic) is the reported
@@ -218,7 +218,7 @@ is deliberately left un-guessed rather than shipped untested.
 
 ---
 
-## 8. The LoRA fine-tuning track — considered, deliberately not completed
+## 8. The LoRA fine-tuning track - considered, deliberately not completed
 
 This repository sits in a folder called `LORA-PIPELINE`, so the omission deserves an
 explicit account rather than silence.
@@ -234,7 +234,7 @@ explicit account rather than silence.
    closed-domain factual QA, a hardened grounding prompt over good retrieval is already
    near the ceiling; fine-tuning buys style and format adherence, not factual grounding.
 4. **It would not fix the measured failure.** The gap in §5 is retrieval and source
-   authority — the model quoting a 2018 self-study report over a 2025 source. No amount of
+   authority - the model quoting a 2018 self-study report over a 2025 source. No amount of
    fine-tuning corrects a stale passage in the context window.
 
 ### What was done for that track instead
@@ -245,7 +245,7 @@ explicit account rather than silence.
   tests enforce this contract.
 - **The serving path is wired and ready.** Deploy an endpoint, set `PHI3_ENDPOINT_URL`,
   and the option appears in the UI with no code change.
-- **The training dataset was generated** — `dataset/train.jsonl` (260 records) and
+- **The training dataset was generated** - `dataset/train.jsonl` (260 records) and
   `dataset/eval.jsonl` (29), built from the real corpus. It had never been generated
   before, so the notebook previously had nothing to consume.
 - **The notebook was audited and six real defects fixed** (it had never been run):
@@ -253,7 +253,7 @@ explicit account rather than silence.
   | Defect | Consequence | Fix |
   |---|---|---|
   | Installed `chromadb` | Minutes of Colab time and a build risk for a dependency the project dropped for FAISS | Removed, along with the leftover `/content/chroma_db` |
-  | `unsloth@git+main`, unpinned `trl`/`peft`/`accelerate`/`bitsandbytes` | The most common way these notebooks break — Unsloth patches transformers in place and main drifts | Pinned |
+  | `unsloth@git+main`, unpinned `trl`/`peft`/`accelerate`/`bitsandbytes` | The most common way these notebooks break - Unsloth patches transformers in place and main drifts | Pinned |
   | `HF_TOKEN = "hf_your_token_here"` and the Groq key as cell literals | Tokens get committed and shared with the notebook | Read from Colab Secrets via `userdata.get()` |
   | `from langchain.text_splitter import ...` | Deprecated path under langchain 0.2.x | `langchain_text_splitters` |
   | Only pushed ~7.5 GB merged weights | A session timeout or full disk during the merge loses the entire training run | Adapter (a few MB) pushed first; merge is now an explicit `PUSH_MERGED` flag |
@@ -264,13 +264,13 @@ explicit account rather than silence.
 Both existing generators produce data that would make the model worse:
 
 - `--mode local` (keyword heuristics): **36% of answers under 60 characters, 39% of
-  questions under 30, 16% dangling mid-phrase** — pairs like *"What are the marks?"* →
+  questions under 30, 16% dangling mid-phrase** - pairs like *"What are the marks?"* →
   *"60% (55% for SC/ST)marks in aggregate and Physics as one of the subject at..."*.
 - `--mode groq` asks llama-3.1-8b to write the training data for a model of the same
-  class, so the ceiling is its own output quality — and on the free tier it needs ~9s per
+  class, so the ceiling is its own output quality - and on the free tier it needs ~9s per
   call to stay inside 6,000 tokens/minute.
 
-**The deeper flaw was the format, not the wording.** Both generators emit `input: ""` —
+**The deeper flaw was the format, not the wording.** Both generators emit `input: ""` -
 question in, answer out, no context. That trains the model to answer college questions
 from parametric memory, which is the exact behaviour the grounding prompt exists to
 prevent. Worse, the notebook's `format_alpaca` zipped only `instruction` and `output`, so
@@ -294,7 +294,7 @@ Two design points worth naming:
    inference. The notebook's formatter was rewritten to render it (and to append EOS,
    without which the model never learns to stop).
 2. **Refusals are training data.** Neither generator can produce one, because both derive
-   questions from the passage that contains the answer — so neither teaches the single
+   questions from the passage that contains the answer - so neither teaches the single
    behaviour this product depends on. The curated set pairs reasonable questions with
    context that genuinely does not answer them: other institutions' fees, personal
    records, prompt-injection attempts, subjective judgements ("are the hostel rooms
@@ -303,7 +303,7 @@ Two design points worth naming:
 **Honest caveat: 70 pairs is a small set.** It is enough to shape behaviour (format
 adherence and refusal discipline) with LoRA r=16 over 2 epochs, but it is not enough to
 claim a broad capability gain. Extending it means adding entries to the two lists in
-`curated_dataset.py` — the structure and the quality bar are established.
+`curated_dataset.py` - the structure and the quality bar are established.
 
 **Still not trained.** No GPU here, and the run needs the owner's Colab and HF accounts.
 Everything upstream of pressing "Run all" is now correct and verified.
