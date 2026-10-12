@@ -1,5 +1,12 @@
 # CollegeBot
 
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)
+![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?style=flat-square&logo=langchain&logoColor=white)
+![FAISS](https://img.shields.io/badge/FAISS%20%2B%20BM25-2c5364?style=flat-square)
+![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=flat-square&logo=streamlit&logoColor=white)
+![Groq](https://img.shields.io/badge/Groq%20Llama%203.1-2c9fbf?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-64%20passing-2ea44f?style=flat-square)
+
 A grounded question-answering assistant for college information. It answers questions
 about admissions, fees, hostels, courses, scholarships, placements and campus policy
 **only** from a corpus of source documents, cites the document and page it used, and
@@ -341,8 +348,8 @@ are excluded from RAGAS averages, since a correct "I don't know" scores near zer
 faithfulness and would mask real generation quality.
 
 Latest measured numbers, the honest caveats, and the diagnosis of what still fails are in
-[SUMMARY_REPORT.md](SUMMARY_REPORT.md). Short version: **refusal accuracy 0.87–0.97
-against a 0.95 target, fact recall 0.74–0.77 against 0.85.** Neither target is reliably
+[SUMMARY_REPORT.md](SUMMARY_REPORT.md). Short version: **refusal accuracy 0.87 to 0.97
+against a 0.95 target, fact recall 0.74 to 0.77 against 0.85.** Neither target is reliably
 met, and the run-to-run spread was larger than some of the improvements being measured -
 which is why the harness is now pinned to temperature 0.0.
 
@@ -425,7 +432,7 @@ python generate_dataset.py --mode curated     # writes dataset/train.jsonl + eva
 3. Add `HF_TOKEN` (write scope) and `GROQ_API_KEY` as **Colab Secrets** - the notebook
    reads them via `userdata.get()`, so tokens never sit in a cell.
 4. Copy the cells from `notebooks/CollegeBot_Colab.py` and run them in order. Roughly
-   60–75 min for Phi-3-mini and ~90 min for Mistral-7B.
+   60 to 75 min for Phi-3-mini and ~90 min for Mistral-7B.
 5. The **adapter is pushed first** (a few MB, seconds) so a session timeout cannot lose
    the run; the merged 16-bit model is pushed after, behind a `PUSH_MERGED` flag.
 6. Create a Hugging Face Inference Endpoint for the pushed model, then set
@@ -486,7 +493,7 @@ Never commit `.env` or `.streamlit/secrets.toml`.
   large older documents sometimes outrank current ones, so the model can quote a 2018
   figure. Per-document authority weighting is the next measured change.
 - **The free Groq tier is the throughput ceiling** - 6,000 tokens/minute, shared across
-  everyone using a deployment. Roughly 2–3 questions per minute; the UI explains the wait
+  everyone using a deployment. Roughly 2 to 3 questions per minute; the UI explains the wait
   rather than showing a bare error.
 - **Answers are only as current as the documents.** Fees, deadlines and rankings change
   every cycle - verify anything consequential with the institution directly.
@@ -505,3 +512,7 @@ Never commit `.env` or `.streamlit/secrets.toml`.
 MIT - see [LICENSE](LICENSE). The documents under `data/` are third-party institutional
 material and are **not** covered by that licence; verify redistribution rights before
 publishing this repository.
+
+---
+
+<sub>Built by [Aryan Awasthi](https://github.com/Techy-A). ENC @ Thapar Institute of Engineering and Technology.</sub>
