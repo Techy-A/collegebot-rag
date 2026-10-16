@@ -1,361 +1,223 @@
 # CollegeBot
 
+![CI](https://github.com/Techy-A/collegebot-rag/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)
 ![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?style=flat-square&logo=langchain&logoColor=white)
 ![FAISS](https://img.shields.io/badge/FAISS%20%2B%20BM25-2c5364?style=flat-square)
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=flat-square&logo=streamlit&logoColor=white)
 ![Groq](https://img.shields.io/badge/Groq%20Llama%203.1-2c9fbf?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-64%20passing-2ea44f?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-64%20offline-2ea44f?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)
 
-A grounded question-answering assistant for college information. It answers questions
-about admissions, fees, hostels, courses, scholarships, placements and campus policy
-**only** from a corpus of source documents, cites the document and page it used, and
-declines when the answer is not in the corpus.
+**A grounded question-answering assistant for Thapar Institute of Engineering and Technology.** It answers questions about admissions, fees, hostels, courses, scholarships, placements and campus policy **only** from a corpus of source documents, cites the document, page and year it used, and **declines when the answer is not there**.
 
-Runs entirely on free infrastructure: FAISS (vector store), Hugging Face
-sentence-transformers (embeddings), Groq Cloud (inference), Streamlit (UI).
+It runs entirely on free infrastructure: FAISS and BM25 for search, Hugging Face sentence-transformers for embeddings, Groq Cloud for inference and Streamlit for the interface.
 
-**Current index:** 2,185 chunks from 24 documents - 16 institutional PDFs plus 8
-researched reference documents on Thapar Institute (TIET), Patiala.
+> **Why grounding matters, in one example.** An earlier version indexed a synthetic test handbook by mistake. Asked *"What are the library opening hours?"*, it confidently answered "Monday to Saturday, 8:00 AM to 8:00 PM", a fact that existed nowhere in reality. After the fixture was removed and the corpus rebuilt, the same question returns *"open 24 hours a day, on all 365 days of the year"*, with a citation to the source.
 
 ---
 
-## Table of contents
+## At a glance
 
-- [How to run](#how-to-run)
-- [System architecture](#system-architecture)
-- [Files](#files)
-- [Design decisions](#design-decisions-worth-knowing)
-- [Evaluation](#evaluation)
-- [Fine-tuning (QLoRA)](#fine-tuning-qlora)
-- [Configuration](#configuration)
-- [Deploying](#deploying-to-streamlit-community-cloud)
-- [Known limitations](#known-limitations)
+| | |
+|:--|:--|
+| **Corpus** | 2,185 chunks from 24 documents: 16 institutional PDFs and 8 researched reference documents |
+| **Retrieval** | Hybrid dense + BM25 search fused with Reciprocal Rank Fusion, top 8 passages |
+| **Retrieval quality** | The key fact reaches the model's context for **88.6%** of answerable questions, up from 77.1% with dense search alone |
+| **Answering** | Groq `llama-3.1-8b-instant`, streamed, with numbered citation cards |
+| **Refusals** | Out-of-corpus questions get a distinct "not in the knowledge base" notice, never a guess |
+| **Evaluation** | 39-question gold set over the real corpus: refusal accuracy **0.87 to 0.97**, fact recall **0.74 to 0.77** (targets 0.95 and 0.85, not yet met) |
+| **Engineering** | 64 offline tests, ruff lint and format, GitHub Actions CI on every push |
+| **Fine-tuning** | QLoRA pipeline for Phi-3-mini and Mistral-7B, built and tested; the training run itself is still to be executed |
+
+## What makes it different
+
+- **It never claims something it did not do.** The status pill reflects a real health check, the model chip names the model that actually answered, refusals look like refusals, and heuristic scores are labelled as heuristics.
+- **Retrieval was chosen by measurement.** Nine configurations were compared on the same questions. Hybrid search tied the best cross-encoder reranker at zero added latency, and adding the reranker on top made it worse.
+- **Evaluation is reported honestly.** The harness is committed, its results are committed, and the README states plainly that neither target is met yet, including the run-to-run noise that makes some improvements unprovable.
+- **Sessions are isolated.** Only stateless objects (the embedding model and the indexes) are shared between visitors; conversations live in each visitor's own session.
 
 ---
 
-## How to run
+## Quick start
 
-### 1. Prerequisites
-
-- **Python 3.9+** (3.11 recommended - 3.9 reached end of life in October 2025)
-- A **free Groq API key** from [console.groq.com/keys](https://console.groq.com/keys)
-  (no credit card required)
-- ~1 GB disk for dependencies, ~10 MB for the index
-
-### 2. Install
+You need Python 3.9 or newer (3.11 recommended) and a free [Groq API key](https://console.groq.com/keys) (no credit card).
 
 ```bash
+git clone https://github.com/Techy-A/collegebot-rag.git
 cd collegebot-rag
-python3 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+python3 -m venv venv && source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env                                  # then set GROQ_API_KEY in .env
+python ingest.py                                      # builds faiss_store/ in about a minute
+streamlit run app.py                                  # opens http://localhost:8501
 ```
 
-### 3. Add your API key
+`.env` is git-ignored; never commit it. No documents of your own? `python ingest.py --sample` writes a small synthetic handbook so the pipeline can be tested immediately.
 
-```bash
-cp .env.example .env
-```
-
-Then edit `.env` so it contains at minimum:
-
-```
-GROQ_API_KEY=gsk_your_key_here
-FAISS_PATH=./faiss_store
-```
-
-`.env` is git-ignored. Never commit it.
-
-### 4. Build the search index
-
-```bash
-python ingest.py
-```
-
-Reads everything in `data/`, splits it into 800-character chunks, embeds them on CPU and
-writes `faiss_store/`. Takes about a minute for the bundled corpus and prints a retrieval
-smoke test at the end.
-
-No documents of your own? `python ingest.py --sample` writes a small synthetic handbook
-first, so the pipeline is testable immediately.
-
-### 5. Run the app
-
-```bash
-streamlit run app.py
-```
-
-Opens at **http://localhost:8501**. The first question of a session takes a few seconds
-longer while the embedding model and index load - the UI says so explicitly.
-
-### 6. Try it
-
-Ask something the corpus covers, e.g.:
+**Try it** with questions the corpus covers:
 
 - *"What is the B.Tech tuition fee?"*
 - *"How many hostels are there and what do they cost?"*
-- *"What are the library opening hours?"*
 - *"What was the average placement package?"*
 
-Then ask something it should refuse, e.g. *"What is the B.Tech fee at IIT Delhi?"* - a
-refusal renders as a distinct amber notice, never as an answer.
+Then ask something it should refuse, such as *"What is the B.Tech fee at IIT Delhi?"*. The refusal appears as an amber notice, never as an answer.
 
-### Other commands
+<details>
+<summary><b>Other commands</b></summary>
 
 ```bash
 pytest tests/ -q                                  # 64 tests, no API key or index needed
 python evaluation/ragas_eval.py                   # grounding checks on the real corpus
-python evaluation/ragas_eval.py --ragas --limit 8 # + LLM-judged RAGAS on a subset
+python evaluation/ragas_eval.py --ragas --limit 8 # adds LLM-judged RAGAS on a subset
 python evaluation/ragas_eval.py --multi-turn      # follow-up conversation scenarios
-python generate_dataset.py --mode curated         # build the QLoRA training set
+python generate_dataset.py --mode curated         # builds the QLoRA training set
 ruff check . && ruff format --check .             # lint
 ```
 
-### Troubleshooting
+</details>
+
+<details>
+<summary><b>Troubleshooting</b></summary>
 
 | Symptom | Cause and fix |
-|---|---|
+|:--|:--|
 | `No FAISS store found at './faiss_store'` | Run `python ingest.py` |
-| Sidebar shows **Unavailable**, "No LLM backend configured" | `GROQ_API_KEY` missing from `.env` |
-| *"Too many questions per minute"* notice | Groq's free tier allows **6,000 tokens/minute**. It refills in under a minute; nothing is broken and no daily quota is spent. |
-| First answer is slow | One-time embedding model + index load per session |
+| Sidebar shows **Unavailable**, "No LLM backend configured" | `GROQ_API_KEY` is missing from `.env` |
+| *"Too many questions per minute"* notice | Groq's free tier allows 6,000 tokens per minute. It refills in under a minute; nothing is broken |
+| First answer is slow | The embedding model and index load once per session |
 | `Port 8501 is already in use` | `pkill -f "streamlit run app.py"`, then start again |
-| Fine-tuned models missing from the dropdown | Correct behaviour - they only appear when an endpoint is actually configured. See [Fine-tuning](#fine-tuning-qlora). |
+| Fine-tuned models missing from the dropdown | Correct behaviour: they only appear when an endpoint is configured. See [Fine-tuning](#fine-tuning-qlora) |
+
+</details>
 
 ---
 
-## System architecture
+## How it works
 
-```
-┌─────────────────────────── INGEST (offline, one command) ──────────────────────────┐
-│                                                                                    │
-│   data/*.pdf *.txt *.docx *.html                                                   │
-│         │                                                                          │
-│         ├─ load          PyPDFLoader / TextLoader / Docx2txt / UnstructuredHTML    │
-│         ├─ dedupe        SHA-256 digest, skip byte-identical files                 │
-│         ├─ tag year      "fee-structure-2026.pdf" → effective_year = 2026          │
-│         ├─ split         RecursiveCharacterTextSplitter, 800 chars / 150 overlap    │
-│         ├─ embed         all-MiniLM-L6-v2, 384-dim, CPU                            │
-│         └─ persist       faiss_store/index.faiss + index.pkl + manifest.json       │
-│                                                       (ingest.py)                  │
-└────────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph INGEST["Ingest: ingest.py, offline"]
+        D["data/: PDF, TXT, DOCX, HTML"] --> L["Load and dedupe<br/>SHA-256 digest"]
+        L --> Y["Tag effective year<br/>fee-structure-2026.pdf to 2026"]
+        Y --> C["Split<br/>800 chars, 150 overlap"]
+        C --> E["Embed<br/>all-MiniLM-L6-v2, 384-dim, CPU"]
+        E --> F[("faiss_store/<br/>index + manifest")]
+    end
 
-┌─────────────────────────── QUERY (live, per question) ─────────────────────────────┐
-│                                                                                    │
-│   user question ──┬─────────────────────────────────────────────────────┐          │
-│                   │                                                     │          │
-│                   ▼                                                     │          │
-│      build_retrieval_query()                                            │          │
-│      prepends the previous question so elliptical follow-ups            │          │
-│      ("and for M.Tech?") stay retrievable - costs no extra LLM call     │          │
-│                   │                                                     │          │
-│         ┌─────────┴─────────┐                                           │          │
-│         ▼                   ▼                                           │          │
-│   FAISS dense          BM25 sparse                                      │          │
-│   (top 30)             (top 30)                                         │          │
-│         └─────────┬─────────┘                                           │          │
-│                   ▼                                                     │          │
-│      Reciprocal Rank Fusion  →  top k=8 passages                        │          │
-│      (measured: 77.1% → 88.6% fact-in-context vs dense MMR alone)       │          │
-│                   │                                                     │          │
-│                   ▼                                                     ▼          │
-│      build_prompt()  ── numbered passages + source + page + YEAR ── conversation   │
-│                   │                                     grounding rules   history  │
-│                   ▼                                     (prompts.py)               │
-│      Groq llama-3.1-8b-instant, temperature 0.05, streamed                         │
-│      retry honours the provider's own "try again in Ns" hint                        │
-│                   │                                                                │
-│                   ▼                                                                │
-│      is_refusal()? ──── yes ──▶ amber "not in the knowledge base" notice            │
-│                   │                                                                │
-│                   no                                                               │
-│                   ▼                                                                │
-│      streamed answer + numbered citation cards (title, page, year, snippet)         │
-│                     + meta line (latency, passages retrieved, model)               │
-│                                              (rag.py → app.py)                     │
-└────────────────────────────────────────────────────────────────────────────────────┘
+    subgraph QUERY["Query: rag.py + app.py, per question"]
+        Q["Question"] --> R["Add the previous question<br/>so follow-ups stay searchable"]
+        R --> DS["FAISS dense search<br/>top 30"]
+        R --> SS["BM25 keyword search<br/>top 30"]
+        DS --> RRF["Reciprocal Rank Fusion<br/>top 8 passages"]
+        SS --> RRF
+        RRF --> P["Grounded prompt<br/>passages + source + page + year<br/>+ conversation history"]
+        P --> G["Groq llama-3.1-8b-instant<br/>temperature 0.05, streamed"]
+        G --> REF{"Refusal?"}
+        REF -- yes --> A1["Amber notice:<br/>not in the knowledge base"]
+        REF -- no --> A2["Streamed answer<br/>+ numbered citation cards"]
+    end
 
-┌─────────────────────────── EVALUATION (offline) ───────────────────────────────────┐
-│                                                                                    │
-│   evaluation/gold_set.py    39 hand-written Q&A over the REAL corpus,               │
-│                             including 4 that must be refused, + multi-turn          │
-│         │                                                                          │
-│         ├─ Layer 1  deterministic, no API calls                                    │
-│         │           refusal accuracy · fact recall · per-domain breakdown           │
-│         │                                                                          │
-│         └─ Layer 2  opt-in --ragas, judged by llama-3.3-70b-versatile              │
-│                     faithfulness · answer relevance · context precision            │
-│                              (evaluation/ragas_eval.py)                            │
-│         ▼                                                                          │
-│   evaluation/eval_results.json  - scores PLUS corpus path, retrieval config,        │
-│                                   judge model and every per-question outcome        │
-└────────────────────────────────────────────────────────────────────────────────────┘
+    F -. loaded once per process .-> DS
+    F -. loaded once per process .-> SS
 ```
 
-### Request lifecycle in one line
+**One request, in one line:** question, plus the previous question, goes to dense and keyword search, the results are fused and the top 8 passages go into a grounded prompt, and Groq streams back an answer with citations, or a styled refusal.
 
-`question → (+prev question) → dense∪sparse → RRF → top-8 → grounded prompt → Groq (streamed) → answer + citations`, or a styled refusal.
-
-### Process model
-
-`st.cache_resource` holds **only** the embedding model, FAISS index and BM25 index -
-stateless objects, safe to share across every visitor to the deployment. Conversation
-state lives in `st.session_state`, per session. Getting this boundary wrong is what
-caused the cross-session conversation bleed described below.
+**What is shared and what is not:** `st.cache_resource` holds only the embedding model, the FAISS index and the BM25 index. These are stateless, so they are safe to share across every visitor. Conversation state lives in `st.session_state`, one per visitor.
 
 ---
 
-## Files
+## Retrieval, measured rather than assumed
 
-### Application
-
-| File | Lines | Role |
-|---|---:|---|
-| `app.py` | 414 | Streamlit UI **only** - layout, chat rendering, citation cards, refusal/error states. No retrieval logic. |
-| `rag.py` | 379 | The pipeline: corpus loading, hybrid retrieval, RRF, prompt assembly, streaming, rate-limit retry, logging. Importable without Streamlit. |
-| `prompts.py` | 51 | The grounding prompt and refusal text. Single source of truth for app **and** evaluation, so they cannot drift. |
-| `llm_factory.py` | 158 | Backend selection with the honesty contract - only serves what is actually configured. |
-| `assets/style.css` | 551 | The premium black theme. |
-
-### Data pipeline
-
-| File | Lines | Role |
-|---|---:|---|
-| `ingest.py` | 383 | Documents → dedupe → year tag → chunk → embed → FAISS + manifest. |
-| `data/` | 24 files | 16 institutional PDFs + 8 researched Thapar reference documents (each ending in its source URLs). |
-| `faiss_store/` | - | `index.faiss`, `index.pkl`, and `manifest.json` recording build time, embedding model, chunk settings and per-file years. |
-
-### Evaluation
-
-| File | Lines | Role |
-|---|---:|---|
-| `evaluation/gold_set.py` | 321 | 39 gold Q&A over the real corpus + 3 multi-turn scenarios. Each item carries `must_include` tokens and an `expect_refusal` flag. |
-| `evaluation/ragas_eval.py` | 381 | Two-layer harness. Deterministic grounding checks always run; RAGAS is opt-in. |
-| `evaluation/quick_score.py` | 167 | Sub-10 ms keyword heuristics for the optional inline display. Labelled as heuristics in the UI, never as verified metrics. |
-| `evaluation/eval_results.json` | - | Committed on purpose: a metric nobody can reproduce is not evidence. |
-
-### Fine-tuning
-
-| File | Lines | Role |
-|---|---:|---|
-| `curated_dataset.py` | 435 | Hand-authored training set: 55 grounded pairs + 15 refusal pairs, each carrying its grounding context. |
-| `generate_dataset.py` | 448 | Dataset CLI - `--mode curated` (recommended), `--mode groq`, `--mode local`. |
-| `notebooks/CollegeBot_Colab.py` | - | QLoRA cells for Phi-3-mini and Mistral-7B on a free Colab T4. |
-
-### Tests and tooling
-
-| File | Lines | Role |
-|---|---:|---|
-| `tests/test_rag.py` | 352 | Retrieval, RRF, citations, prompt assembly, streaming, rate-limit retry. |
-| `tests/test_factory_and_ingest.py` | 161 | The honesty contract, year tagging, digest dedup, heuristic scorer. |
-| `tests/test_dataset_generation.py` | 63 | The Q&A parser, including the multi-line truncation regression. |
-| `.github/workflows/ci.yml` | - | ruff lint + format check + pytest on every push. |
-| `pyproject.toml` | - | ruff and pytest configuration. |
-
-All 64 tests run offline: no API key, no index, no network.
-
-### Documentation
-
-| File | Role |
-|---|---|
-| `README.md` | This file. |
-| `SUMMARY_REPORT.md` | What changed and why, with measured before/after numbers and honest limitations. |
-| `council-improvements.md` | The multi-perspective review that produced the work plan. |
-| `LICENSE` | MIT, plus a note that `data/` is third-party material not covered by it. |
-
----
-
-## Design decisions worth knowing
-
-### The UI never asserts something the system did not do
-
-- The **status pill** reflects a real health check (index loaded *and* a backend
-  configured), not a hardcoded literal.
-- The **model chip** names the model that actually answered.
-- A **refusal is styled as a refusal.** An honest "I don't have that" must not look like
-  an answer.
-- **Heuristic scores are labelled as heuristics**, not presented as verified RAGAS metrics.
-- Message bodies render through `st.markdown()` **without** `unsafe_allow_html`, so
-  neither a question containing `<` nor a PDF chunk containing markup can inject anything.
-
-### The LLM factory's honesty contract
-
-`available_models()` returns only backends that can *actually* be served. Groq appears
-when `GROQ_API_KEY` is set; a fine-tuned model appears only when its Inference Endpoint
-URL **and** `HF_TOKEN` are both configured. `get_llm()` raises rather than quietly
-substituting a different model.
-
-This replaces a design that advertised three models, silently fell back to Groq when the
-two fine-tuned ones could not load, and kept displaying a "Phi-3-mini (fine-tuned)" badge
-over a Groq answer.
-
-### Session isolation
-
-`st.cache_resource` is a **process-global singleton** on Streamlit. An earlier version
-constructed the conversation memory *inside* the cached function, so concurrent visitors
-shared one mutable buffer and their conversations could bleed into each other's context.
-The same bug meant moving the temperature slider re-read the whole index from disk, and
-"Clear conversation" called `st.cache_resource.clear()`, evicting the index for every
-other visitor. Now: stateless objects cached, conversation state per session.
-
-### Hybrid retrieval, chosen by measurement
+Every configuration was scored on one question: *does the key fact reach the context at all?* The test uses the 35 answerable gold questions and makes no LLM calls, so it is fast, free and deterministic.
 
 | Configuration | Fact reaches context | Added latency |
-|---|---|---|
-| Dense MMR k=6 (previous default) | 77.1% | - |
-| BM25 only | 80.0% | - |
-| Dense + cross-encoder reranker | 88.6% | ~2 s/query |
-| **Hybrid dense + BM25 (RRF)** | **88.6%** | **none** |
-| Hybrid + cross-encoder | 85.7% | ~1.4 s/query |
+|:--|:--|:--|
+| Dense MMR, k=6 (previous default) | 77.1% | none |
+| Dense similarity, k=6 | 68.6% | none |
+| BM25 only, k=8 | 80.0% | none |
+| Dense MMR, k=8 | 80.0% | none |
+| Dense + cross-encoder reranker, top 6 | 85.7% | ~1.3 s per query |
+| Dense + cross-encoder reranker, top 8 | 88.6% | ~2.0 s per query |
+| **Hybrid dense + BM25 (RRF), top 8** | **88.6%** | **none** |
+| Hybrid + cross-encoder reranker, top 8 | 85.7% | ~1.4 s per query |
+| Hybrid, top 16 | 91.4% | none, but twice the context tokens |
 
-Hybrid ties the best reranker at zero cost, and stacking a reranker on top made it
-*worse*. Sparse retrieval earns its place because this corpus is full of proper nouns,
-exact amounts and list headings ("TOP RECRUITERS", "Rs 17,24,000", "A++") where lexical
-matching beats a 384-dim dense embedding. Reranking remains available via `USE_RERANKER=1`.
-
-### No `ConversationalRetrievalChain`
-
-That legacy chain fires an extra condense-question LLM call before retrieval on every
-follow-up - two sequential requests per turn against a rate-limited tier - and does not
-stream cleanly. Retrieve → prompt → stream is cheaper and directly streamable. Follow-ups
-stay retrievable by prepending the previous question, which costs no extra API call.
-
-### Document versioning
-
-The corpus holds same-topic documents from different years (a 2025 and a 2026 fee
-structure). `ingest.py` tags every chunk with an effective year, `rag.py` puts that year
-**in the context the model sees**, and the prompt instructs it to prefer the most recent
-source and say which year applies. Citations display the year too.
+Keyword search earns its place because this corpus is full of proper nouns, exact amounts and list headings ("TOP RECRUITERS", "Rs 17,24,000", "A++"), where lexical matching beats a 384-dimensional embedding. Top 8 was kept over top 16 because the extra 2.8 points is not worth doubling the context on a rate-limited free tier. Reranking stays available with `USE_RERANKER=1`.
 
 ---
 
 ## Evaluation
 
-`evaluation/ragas_eval.py` runs the gold set against the **real** indexed corpus using the
-exact prompt and retrieval config the app serves - both imported, so they cannot drift.
+`evaluation/ragas_eval.py` runs the gold set against the **real** indexed corpus, importing the exact prompt and retrieval settings the app serves, so the two cannot drift apart.
 
-**Layer 1 - grounding checks** (deterministic, no API calls, always runs)
+**Layer 1: grounding checks** (deterministic, no API calls, always runs)
 
-- `refusal_accuracy` - did it decline exactly when it should have? A **false refusal on an
-  in-corpus question** is a real failure and is reported by name.
-- `fact_recall` - do answers contain the key figures from the source document?
+- **Refusal accuracy:** did it decline exactly when it should have? A false refusal on an in-corpus question counts as a failure and is reported by name.
+- **Fact recall:** do the answers contain the key figures from the source document?
 
-**Layer 2 - RAGAS** (opt-in, `--ragas`): faithfulness / answer relevance / context
-precision, judged by `llama-3.3-70b-versatile` - a stronger model than the one under test,
-because using the same 8B to grade its own output invites self-preference bias. Refusals
-are excluded from RAGAS averages, since a correct "I don't know" scores near zero on
-faithfulness and would mask real generation quality.
+**Layer 2: RAGAS** (opt-in with `--ragas`). Faithfulness, answer relevance and context precision, judged by `llama-3.3-70b-versatile`. The judge is a stronger model than the one being tested, because a model grading its own output tends to favour it. Correct refusals are excluded from RAGAS averages, since an honest "I don't know" scores near zero on faithfulness and would hide real generation quality.
 
-Latest measured numbers, the honest caveats, and the diagnosis of what still fails are in
-[SUMMARY_REPORT.md](SUMMARY_REPORT.md). Short version: **refusal accuracy 0.87 to 0.97
-against a 0.95 target, fact recall 0.74 to 0.77 against 0.85.** Neither target is reliably
-met, and the run-to-run spread was larger than some of the improvements being measured -
-which is why the harness is now pinned to temperature 0.0.
+| Round | Change | Refusal accuracy (target 0.95) | Fact recall (target 0.85) |
+|:--|:--|:--|:--|
+| 1 | Baseline: dense MMR, k=6, new gold set | 0.923 | 0.571 |
+| 2 | + hybrid dense and BM25 retrieval | 0.974 | 0.714 |
+| 3 | + source year in context, exact-figure prompt rules | 0.974 | 0.771 |
+| 4 | + archived the stale 2018 and annual-report PDFs | 0.872 | 0.714 |
+| 5 | **Reverted to the round 3 setup (what ships)** | **0.872** | **0.743** |
+
+**How to read this table.** Rounds 3 and 5 ran the same setup and scored 0.974 and 0.872 on refusal accuracy, so run-to-run noise at temperature 0.05 is about 0.10. That is larger than some of the improvements being measured. The hybrid-retrieval gain is real, because the deterministic retrieval test above confirms it (77.1% to 88.6%). The prompt change in round 3 is within the noise. The harness now runs at temperature 0.0, so future comparisons are reproducible.
+
+**What still fails, and why.** The remaining misses share one cause: large, older documents sometimes outrank current ones. Asked for the NAAC grade, the model can quote "A" from a 2018 self-study report instead of today's A++. The next measured change is per-document authority weighting at retrieval time. The full analysis is in [SUMMARY_REPORT.md](SUMMARY_REPORT.md).
+
+---
+
+## Design decisions
+
+<details>
+<summary><b>The LLM factory's honesty contract</b></summary>
+
+`available_models()` returns only backends that can actually be served. Groq appears when `GROQ_API_KEY` is set; a fine-tuned model appears only when its Inference Endpoint URL **and** `HF_TOKEN` are both configured. `get_llm()` raises an error rather than quietly substituting a different model.
+
+This replaces an earlier design that advertised three models, silently fell back to Groq when the two fine-tuned ones could not load, and kept showing a "Phi-3-mini (fine-tuned)" badge over a Groq answer.
+
+</details>
+
+<details>
+<summary><b>Session isolation</b></summary>
+
+`st.cache_resource` is a process-wide singleton in Streamlit. An earlier version built the conversation memory inside the cached function, so concurrent visitors shared one buffer and their conversations could leak into each other's context. The same bug made the temperature slider reload the whole index from disk, and "Clear conversation" evicted the index for every other visitor. Now only stateless objects are cached, and conversation state lives in each session.
+
+</details>
+
+<details>
+<summary><b>No ConversationalRetrievalChain</b></summary>
+
+That legacy chain makes an extra LLM call to rewrite every follow-up question before retrieval: two sequential requests per turn on a rate-limited tier, and it does not stream cleanly. Retrieve, prompt, stream is cheaper and streams directly. Follow-ups stay searchable by adding the previous question to the search query, which costs no API call.
+
+</details>
+
+<details>
+<summary><b>Document versioning</b></summary>
+
+The corpus holds same-topic documents from different years, such as the 2025 and 2026 fee structures. `ingest.py` tags every chunk with an effective year, `rag.py` puts that year in the context the model sees, and the prompt tells the model to prefer the most recent source and say which year applies. Citations show the year too.
+
+</details>
+
+<details>
+<summary><b>Safe rendering</b></summary>
+
+Message bodies render through `st.markdown()` without `unsafe_allow_html`, so neither a question containing `<` nor a PDF chunk containing markup can inject anything into the page.
+
+</details>
 
 ---
 
 ## Fine-tuning (QLoRA)
+
+<details>
+<summary><b>Method, hyperparameters, training data and how to run it</b></summary>
 
 The QLoRA pipeline is **built, verified and ready to execute end to end**: the training
 set is authored and validated, the Colab notebook is corrected and compiles, and the
@@ -367,7 +229,7 @@ token, so it is a one-command step the repository owner runs. Until an endpoint 
 UI deliberately does not offer a fine-tuned option - see
 [the honesty contract](#the-llm-factorys-honesty-contract).
 
-### How the fine-tuning works
+#### How the fine-tuning works
 
 **1. Method - QLoRA.** The base model is loaded in 4-bit NF4 quantization, its weights
 frozen, and small low-rank adapter matrices are trained on top. Only the adapters receive
@@ -381,7 +243,7 @@ quantization mismatch between them.
 | Parameter | Value | Reason |
 |---|---|---|
 | LoRA rank `r` | 16 | Enough capacity for domain adaptation without exhausting T4 VRAM |
-| LoRA `alpha` | 32 | Conventional 2× scaling relative to rank |
+| LoRA `alpha` | 32 | Conventional 2x scaling relative to rank |
 | Base precision | 4-bit NF4 | Halves VRAM against fp16; NF4 suits normally-distributed weights |
 | Batch size | 2 (Phi-3) / 1 (Mistral-7B) | The largest that fits; Mistral is the bigger model |
 | Gradient accumulation | 4 / 8 | Gives an effective batch of 8 in both cases |
@@ -410,13 +272,13 @@ decisions matter more than the count:
 EOS so the model learns to stop:
 
 ```
-### Context:
+#### Context:
 {retrieved passages}
 
-### Question:
+#### Question:
 {student question}
 
-### Answer:
+#### Answer:
 {grounded answer}<eos>
 ```
 
@@ -427,8 +289,8 @@ python generate_dataset.py --mode curated     # writes dataset/train.jsonl + eva
 ```
 
 1. Upload `dataset/` to Google Drive (and your source PDFs, if rebuilding the index there).
-2. Open [colab.research.google.com](https://colab.research.google.com) → **Runtime →
-   Change runtime type → T4 GPU**.
+2. Open [colab.research.google.com](https://colab.research.google.com), then **Runtime, Change
+   runtime type, T4 GPU**.
 3. Add `HF_TOKEN` (write scope) and `GROQ_API_KEY` as **Colab Secrets** - the notebook
    reads them via `userdata.get()`, so tokens never sit in a cell.
 4. Copy the cells from `notebooks/CollegeBot_Colab.py` and run them in order. Roughly
@@ -450,15 +312,17 @@ source-authority problem, and the current evaluation gap lives there, not in the
 weights. Treat the fine-tune as a behaviour-shaping step, and keep judging factual quality
 with `evaluation/ragas_eval.py`.
 
+</details>
+
 ---
 
 ## Configuration
 
-All optional except `GROQ_API_KEY`. Set in `.env` or Streamlit secrets.
+Everything is optional except `GROQ_API_KEY`. Set values in `.env` or in Streamlit secrets.
 
 | Variable | Default | Purpose |
-|---|---|---|
-| `GROQ_API_KEY` | - | **Required.** Free at console.groq.com |
+|:--|:--|:--|
+| `GROQ_API_KEY` | none | **Required.** Free at console.groq.com |
 | `FAISS_PATH` | `./faiss_store` | Index location |
 | `GROQ_MODEL` | `llama-3.1-8b-instant` | Serving model |
 | `JUDGE_MODEL` | `llama-3.3-70b-versatile` | RAGAS judge |
@@ -467,14 +331,12 @@ All optional except `GROQ_API_KEY`. Set in `.env` or Streamlit secrets.
 | `USE_HYBRID` | `1` | Dense + BM25 fusion; `0` for dense-only MMR |
 | `USE_RERANKER` | off | Cross-encoder reranking |
 | `EMBED_MODEL` | `all-MiniLM-L6-v2` | Embedding model |
-| `LOG_LEVEL` | `INFO` | stdout logging |
-| `HF_TOKEN`, `PHI3_ENDPOINT_URL`, `MISTRAL_ENDPOINT_URL` | - | Fine-tuned backends |
-
----
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `HF_TOKEN`, `PHI3_ENDPOINT_URL`, `MISTRAL_ENDPOINT_URL` | none | Fine-tuned backends |
 
 ## Deploying to Streamlit Community Cloud
 
-1. Commit `faiss_store/` - the index must ship, there is no GPU to rebuild it.
+1. Commit `faiss_store/`. The index has to ship, because there is no GPU to rebuild it.
 2. Point a new Streamlit Cloud app at `app.py`.
 3. Under **Secrets**, add:
    ```toml
@@ -487,31 +349,83 @@ Never commit `.env` or `.streamlit/secrets.toml`.
 
 ---
 
-## Known limitations
+## Project structure
 
-- **Neither evaluation target is reliably met** (see above). The main cause is diagnosed:
-  large older documents sometimes outrank current ones, so the model can quote a 2018
-  figure. Per-document authority weighting is the next measured change.
-- **The free Groq tier is the throughput ceiling** - 6,000 tokens/minute, shared across
-  everyone using a deployment. Roughly 2 to 3 questions per minute; the UI explains the wait
-  rather than showing a bare error.
-- **Answers are only as current as the documents.** Fees, deadlines and rankings change
-  every cycle - verify anything consequential with the institution directly.
-- **Tabular PDFs are chunked as prose**, so fee tables can split mid-row. Table-aware
-  extraction is the next retrieval improvement worth measuring.
-- **The corpus is trusted.** There is no structural separation between instructions and
-  retrieved text, so do not add unreviewed third-party documents to `data/`.
-- **No conversation persistence.** Refreshing the page starts a new session.
-- **Python 3.9 is past end of life** (October 2025). The code runs on it; a bump to 3.11+
-  is recommended.
+<details>
+<summary><b>Every file and what it does</b></summary>
+
+#### Application
+
+| File | Lines | Role |
+|---|---:|---|
+| `app.py` | 414 | Streamlit UI **only** - layout, chat rendering, citation cards, refusal/error states. No retrieval logic. |
+| `rag.py` | 379 | The pipeline: corpus loading, hybrid retrieval, RRF, prompt assembly, streaming, rate-limit retry, logging. Importable without Streamlit. |
+| `prompts.py` | 51 | The grounding prompt and refusal text. Single source of truth for app **and** evaluation, so they cannot drift. |
+| `llm_factory.py` | 158 | Backend selection with the honesty contract - only serves what is actually configured. |
+| `assets/style.css` | 551 | The premium black theme. |
+
+#### Data pipeline
+
+| File | Lines | Role |
+|---|---:|---|
+| `ingest.py` | 383 | Documents, dedupe, year tag, chunk, embed, then FAISS + manifest. |
+| `data/` | 24 files | 16 institutional PDFs + 8 researched Thapar reference documents (each ending in its source URLs). |
+| `faiss_store/` | - | `index.faiss`, `index.pkl`, and `manifest.json` recording build time, embedding model, chunk settings and per-file years. |
+
+#### Evaluation
+
+| File | Lines | Role |
+|---|---:|---|
+| `evaluation/gold_set.py` | 321 | 39 gold Q&A over the real corpus + 3 multi-turn scenarios. Each item carries `must_include` tokens and an `expect_refusal` flag. |
+| `evaluation/ragas_eval.py` | 381 | Two-layer harness. Deterministic grounding checks always run; RAGAS is opt-in. |
+| `evaluation/quick_score.py` | 167 | Sub-10 ms keyword heuristics for the optional inline display. Labelled as heuristics in the UI, never as verified metrics. |
+| `evaluation/eval_results.json` | - | Committed on purpose: a metric nobody can reproduce is not evidence. |
+
+#### Fine-tuning
+
+| File | Lines | Role |
+|---|---:|---|
+| `curated_dataset.py` | 435 | Hand-authored training set: 55 grounded pairs + 15 refusal pairs, each carrying its grounding context. |
+| `generate_dataset.py` | 448 | Dataset CLI - `--mode curated` (recommended), `--mode groq`, `--mode local`. |
+| `notebooks/CollegeBot_Colab.py` | - | QLoRA cells for Phi-3-mini and Mistral-7B on a free Colab T4. |
+
+#### Tests and tooling
+
+| File | Lines | Role |
+|---|---:|---|
+| `tests/test_rag.py` | 352 | Retrieval, RRF, citations, prompt assembly, streaming, rate-limit retry. |
+| `tests/test_factory_and_ingest.py` | 161 | The honesty contract, year tagging, digest dedup, heuristic scorer. |
+| `tests/test_dataset_generation.py` | 63 | The Q&A parser, including the multi-line truncation regression. |
+| `.github/workflows/ci.yml` | - | ruff lint + format check + pytest on every push. |
+| `pyproject.toml` | - | ruff and pytest configuration. |
+
+All 64 tests run offline: no API key, no index, no network.
+
+#### Documentation
+
+| File | Role |
+|---|---|
+| `README.md` | This file. |
+| `SUMMARY_REPORT.md` | What changed and why, with measured before/after numbers and honest limitations. |
+| `council-improvements.md` | The multi-perspective review that produced the work plan. |
+| `LICENSE` | MIT, plus a note that `data/` is third-party material not covered by it. |
+
+</details>
 
 ---
 
-## Licence
+## Known limitations
 
-MIT - see [LICENSE](LICENSE). The documents under `data/` are third-party institutional
-material and are **not** covered by that licence; verify redistribution rights before
-publishing this repository.
+- **Neither evaluation target is reliably met yet** (see [Evaluation](#evaluation)). The main cause is diagnosed: large older documents sometimes outrank current ones.
+- **The free Groq tier sets the throughput ceiling:** 6,000 tokens per minute shared by everyone using a deployment, roughly 2 to 3 questions per minute. The interface explains the wait instead of showing a bare error.
+- **Answers are only as current as the documents.** Fees, deadlines and rankings change every year, so verify anything important with the institute directly.
+- **Fee tables are chunked as prose,** so a table can split mid-row. Table-aware extraction is the next retrieval improvement to measure.
+- **The corpus is trusted.** Instructions and retrieved text are not structurally separated, so do not add unreviewed third-party documents to `data/`.
+- **No conversation persistence.** Refreshing the page starts a new session.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The documents under `data/` are third-party institutional material and are **not** covered by that licence.
 
 ---
 
